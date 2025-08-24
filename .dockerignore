@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -7,8 +7,10 @@ yarn-error.log*
 # Next.js
 .next/
 out/
-build/
-dist/
+
+# Production
+build
+dist
 
 # Environment files
 .env
@@ -17,13 +19,9 @@ dist/
 .env.test.local
 .env.production.local
 
-# Database
-prisma/dev.db
-prisma/*.db
-
 # IDE
-.vscode/
-.idea/
+.vscode
+.idea
 *.swp
 *.swo
 
@@ -31,36 +29,49 @@ prisma/*.db
 .DS_Store
 Thumbs.db
 
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Documentation
+README.md
+*.md
+
 # Logs
-logs/
+logs
 *.log
 
 # Runtime data
-pids/
+pids
 *.pid
 *.seed
 *.pid.lock
 
-# Coverage
-coverage/
-.nyc_output/
+# Coverage directory used by tools like istanbul
+coverage
 
-# Cache
-.cache/
-.parcel-cache/
-.eslintcache/
+# nyc test coverage
+.nyc_output
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Microbundle cache
 .rpt2_cache/
 .rts2_cache_cjs/
 .rts2_cache_es/
 .rts2_cache_umd/
-
-# Temporary files
-tmp/
-temp/
-cookies.txt
-
-# Optional npm cache
-.npm
 
 # Optional REPL history
 .node_repl_history
@@ -71,8 +82,21 @@ cookies.txt
 # Yarn Integrity file
 .yarn-integrity
 
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# next.js build output
+.next
+
+# nuxt.js build output
+.nuxt
+
+# vuepress build output
+.vuepress/dist
+
 # Serverless directories
-.serverless/
+.serverless
 
 # FuseBox cache
 .fusebox/
@@ -84,4 +108,8 @@ cookies.txt
 .tern-port
 
 # Stores VSCode versions used for testing VSCode extensions
-.vscode-test/
+.vscode-test
+
+# Temporary folders
+tmp/
+temp/
