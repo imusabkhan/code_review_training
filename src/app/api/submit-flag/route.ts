@@ -1,26 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { challenges } from '@/data/challenges';
-import { PrismaClient } from '@/generated/prisma'
-
-const prisma = new PrismaClient()
+import { prisma } from '@/lib/prisma';
+import { getPlayerName } from '@/lib/playerSession';
 
 export async function POST(req: NextRequest) {
   try {
-    const { challengeId, flag, name } = await req.json();
-    console.log('Flag submission attempt:', { challengeId, flag: flag ? '***' : 'undefined', name });
+    const { challengeId, flag } = await req.json();
 
-    if (!challengeId || !flag || !name) {
+    if (!challengeId || !flag) {
       return NextResponse.json({ success: false, error: 'Missing fields' }, { status: 400 });
     }
 
+    // Identity comes from the signed session cookie, never the request body —
+    // otherwise anyone could submit a known flag under another player's name.
+    const name = await getPlayerName(req);
+    if (!name) {
+      return NextResponse.json({ success: false, error: 'Not signed in' }, { status: 401 });
+    }
+
     // Find the challenge
-    const challenge = challenges.find(c => c.id === challengeId);
+    const challenge = await prisma.challenge.findUnique({ where: { id: challengeId } });
     if (!challenge) {
       return NextResponse.json({ success: false, error: 'Challenge not found' }, { status: 404 });
     }
 
     // Check if challenge has a flag property (for challenges created via admin panel)
-    let expectedFlag = challenge.flag;
+    let expectedFlag = challenge.flag ?? undefined;
 
     // If no flag in challenge object, try environment variable
     if (!expectedFlag) {

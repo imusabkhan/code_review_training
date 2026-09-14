@@ -1,6 +1,22 @@
-import type { Challenge } from "../types/challenge"
+import { PrismaClient } from '../src/generated/prisma/index.js'
 
-export const challenges: Challenge[] = [
+const prisma = new PrismaClient()
+
+type SeedChallenge = {
+  id: string
+  title: string
+  description: string
+  code: string
+  vulnerableLines: number[]
+  difficulty: 'beginner' | 'intermediate' | 'advanced'
+  hints?: string[]
+  explanations: Record<number, string>
+  flag?: string
+  labUrl?: string
+  maxSelectableLines?: number
+}
+
+const challenges: SeedChallenge[] = [
   {
     "id": "DEMO",
     "title": "How to Play: Demo Challenge",
@@ -155,3 +171,46 @@ export const challenges: Challenge[] = [
     "flag": "flat{xss_demo_1}"
   }
 ]
+
+async function main() {
+  for (const challenge of challenges) {
+    await prisma.challenge.upsert({
+      where: { id: challenge.id },
+      update: {
+        title: challenge.title,
+        description: challenge.description,
+        code: challenge.code,
+        vulnerableLines: JSON.stringify(challenge.vulnerableLines),
+        difficulty: challenge.difficulty,
+        hints: challenge.hints ? JSON.stringify(challenge.hints) : null,
+        explanations: JSON.stringify(challenge.explanations),
+        flag: challenge.flag ?? null,
+        labUrl: challenge.labUrl ?? null,
+        maxSelectableLines: challenge.maxSelectableLines ?? null,
+      },
+      create: {
+        id: challenge.id,
+        title: challenge.title,
+        description: challenge.description,
+        code: challenge.code,
+        vulnerableLines: JSON.stringify(challenge.vulnerableLines),
+        difficulty: challenge.difficulty,
+        hints: challenge.hints ? JSON.stringify(challenge.hints) : null,
+        explanations: JSON.stringify(challenge.explanations),
+        flag: challenge.flag ?? null,
+        labUrl: challenge.labUrl ?? null,
+        maxSelectableLines: challenge.maxSelectableLines ?? null,
+      },
+    })
+  }
+  console.log(`Seeded ${challenges.length} challenges.`)
+}
+
+main()
+  .catch((e) => {
+    console.error(e)
+    process.exit(1)
+  })
+  .finally(async () => {
+    await prisma.$disconnect()
+  })

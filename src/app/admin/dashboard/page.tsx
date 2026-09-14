@@ -248,7 +248,6 @@ export default function AdminDashboard() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {console.log('Rendering AdminPanel with:', { locks, challengesLength: challenges.length, challenges })}
                 <AdminPanel locks={locks} onToggleLock={handleToggleLock} challenges={challenges} />
               </CardContent>
             </Card>

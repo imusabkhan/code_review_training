@@ -13,3 +13,9 @@ export interface Challenge {
 }
 
 export type Difficulty = "beginner" | "intermediate" | "advanced"
+
+// What a player is allowed to see before/without a submission: no answers, no flag.
+export type PlayerChallenge = Omit<Challenge, "vulnerableLines" | "explanations" | "flag">
+
+// Minimal shape needed to render the admin lock/unlock panel.
+export type ChallengeSummary = Pick<Challenge, "id" | "title" | "description">

@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { PrismaClient } from '@/generated/prisma';
+import { prisma } from '@/lib/prisma';
 import { isAdminSession } from '@/lib/isAdminSession';
-
-const prisma = new PrismaClient();
 
 export async function POST(request: NextRequest) {
   if (!(await isAdminSession(request))) {

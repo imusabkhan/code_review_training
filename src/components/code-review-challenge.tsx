@@ -2,8 +2,8 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, Lightbulb, Lock, Unlock, X } from "lucide-react"
-import type { Challenge } from "@/types/challenge"
+import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, Lightbulb, Lock, Unlock } from "lucide-react"
+import type { PlayerChallenge, ChallengeSummary } from "@/types/challenge"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { io, Socket } from 'socket.io-client'
@@ -17,20 +17,17 @@ function getRandomAvatar() {
 }
 
 
-function UserBar({ name, avatar, score, isAdmin, onAdminLogout }: { name: string; avatar: string; score: number; isAdmin: boolean; onAdminLogout: () => void }) {
+function UserBar({ name, avatar, score }: { name: string; avatar: string; score: number }) {
   return (
     <div className="fixed top-4 right-4 z-50 flex items-center gap-3 bg-white/80 shadow rounded-full px-4 py-2 border border-gray-200">
       <span className="text-2xl select-none" aria-label="avatar">{avatar}</span>
       <span className="font-medium text-gray-800">{name}</span>
       <span className="ml-2 px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-semibold">Score: {score}</span>
-      {isAdmin && (
-        <Button size="sm" variant="outline" onClick={onAdminLogout}>Logout Admin</Button>
-      )}
     </div>
   );
 }
 
-function NameModal({ open, onSubmit }: { open: boolean; onSubmit: (name: string) => void }) {
+function NameModal({ open, onSubmit, submitting, claimError }: { open: boolean; onSubmit: (name: string) => void; submitting?: boolean; claimError?: string }) {
   const [input, setInput] = useState("");
   const [checking, setChecking] = useState(false);
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -64,6 +61,12 @@ function NameModal({ open, onSubmit }: { open: boolean; onSubmit: (name: string)
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: name })
       });
+      if (!res.ok) {
+        // A server/DB error is NOT the same as "taken" — don't claim it is.
+        setError("Could not check username availability. Please try again.");
+        setAvailable(null);
+        return;
+      }
       const data = await res.json();
       setAvailable(data.available);
       if (!data.available) setError("Username is already taken");
@@ -76,7 +79,7 @@ function NameModal({ open, onSubmit }: { open: boolean; onSubmit: (name: string)
   };
 
   const handleContinue = () => {
-    if (input.trim() && available) onSubmit(input.trim());
+    if (input.trim() && available && !submitting) onSubmit(input.trim());
   };
 
   if (!open) return null;
@@ -91,56 +94,24 @@ function NameModal({ open, onSubmit }: { open: boolean; onSubmit: (name: string)
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={async e => {
-            if (e.key === 'Enter' && input.trim() && available) {
+            if (e.key === 'Enter' && input.trim() && available && !submitting) {
               onSubmit(input.trim());
             }
           }}
         />
         {checking && <div className="text-xs text-gray-500">Checking availability...</div>}
         {error && <div className="text-xs text-red-600">{error}</div>}
-        <Button className="w-full mt-2" onClick={handleContinue} disabled={checking || available !== true}>
-          Continue
+        {claimError && <div className="text-xs text-red-600">{claimError}</div>}
+        <Button className="w-full mt-2" onClick={handleContinue} disabled={checking || available !== true || submitting}>
+          {submitting ? "Joining..." : "Continue"}
         </Button>
       </div>
     </div>
   );
 }
 
-function AdminModal({ open, onSubmit, onClose, error }: { open: boolean, onSubmit: (password: string) => void, onClose: () => void, error?: string }) {
-  const [input, setInput] = useState("");
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-lg shadow-lg p-8 w-full max-w-xs flex flex-col items-center gap-4 relative">
-        <button
-          className="absolute top-3 right-3 text-gray-400 hover:text-gray-700 focus:outline-none"
-          onClick={onClose}
-          aria-label="Close"
-          type="button"
-        >
-          <X className="h-5 w-5" />
-        </button>
-        <h2 className="text-xl font-bold mb-2">Admin Login</h2>
-        <p className="text-gray-600 text-sm mb-2">Enter admin password:</p>
-        <input
-          className="border rounded px-3 py-2 w-full focus:outline-none focus:ring"
-          placeholder="Password"
-          type="password"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && input.trim()) onSubmit(input.trim()); }}
-        />
-        {error && <div className="text-red-600 text-xs">{error}</div>}
-        <div className="flex gap-2 w-full">
-          <Button className="w-full mt-2" onClick={() => input.trim() && onSubmit(input.trim())}>Login</Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // --- Timer Hook ---
-function useChallengeTimer(selectedChallenge: Challenge | null) {
+function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
   const [timer, setTimer] = useState<{ startTime: number; duration: number; isRunning: boolean; isPaused: boolean } | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const socketRef = useRef<Socket | null>(null);
@@ -205,7 +176,7 @@ function TimerDisplay({ timeLeft }: { timeLeft: number }) {
 export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
   locks: Record<string, boolean>,
   onToggleLock: (id: string) => void,
-  challenges?: Challenge[]
+  challenges?: ChallengeSummary[]
 }) {
   const [resetting, setResetting] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
@@ -544,7 +515,7 @@ function ResizableCard({ children, defaultWidth = 0 }: { children: React.ReactNo
 }
 
 // --- ChallengeTimer component ---
-function ChallengeTimer({ selectedChallenge }: { selectedChallenge: Challenge }) {
+function ChallengeTimer({ selectedChallenge }: { selectedChallenge: PlayerChallenge }) {
   const { timeLeft } = useChallengeTimer(selectedChallenge);
 
   if (timeLeft > 0) {
@@ -618,20 +589,18 @@ function getDynamicLabUrl(labPath: string) {
 }
 
 export default function CodeReviewChallenge() {
-  // User state
+  // User state — identity lives in a server-issued session cookie (see
+  // /api/player-session), never in localStorage or anything client-trusted.
   const [user, setUser] = useState({ name: "", avatar: "", score: 0 });
   const [showNameModal, setShowNameModal] = useState(false);
-
-  // Admin state
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [showAdminModal, setShowAdminModal] = useState(false);
-  const [adminError, setAdminError] = useState("");
+  const [claimingName, setClaimingName] = useState(false);
+  const [claimError, setClaimError] = useState("");
 
   // Challenge lock state (persisted via API)
   const [locks, setLocks] = useState<Record<string, boolean>>({});
 
   // Challenges state - dynamically fetched
-  const [challenges, setChallenges] = useState<Challenge[]>([]);
+  const [challenges, setChallenges] = useState<PlayerChallenge[]>([]);
   const [challengesLoading, setChallengesLoading] = useState(true);
 
   // Debug challenges state changes
@@ -644,7 +613,7 @@ export default function CodeReviewChallenge() {
   }, [challenges, challengesLoading]);
 
   // Challenge state
-  const [selectedChallenge, setSelectedChallenge] = useState<Challenge | null>(null)
+  const [selectedChallenge, setSelectedChallenge] = useState<PlayerChallenge | null>(null)
   const [selectedLines, setSelectedLines] = useState<number[]>([])
   const [submitted, setSubmitted] = useState(false)
   const [showResults, setShowResults] = useState(false)
@@ -654,6 +623,11 @@ export default function CodeReviewChallenge() {
 
   // Track if the last submission was correct
   const [lastSubmissionCorrect, setLastSubmissionCorrect] = useState<boolean | null>(null);
+  // Per-line correct/incorrect feedback for the lines the user selected (server-authoritative)
+  const [submissionFeedback, setSubmissionFeedback] = useState<{ line: number; status: string }[]>([]);
+  // The answer key, only populated once the server reveals it after a correct submission
+  const [revealedVulnerableLines, setRevealedVulnerableLines] = useState<number[]>([]);
+  const [revealedExplanations, setRevealedExplanations] = useState<Record<number, string>>({});
 
   // Attempts state
   const [attemptsUsed, setAttemptsUsed] = useState(0);
@@ -671,127 +645,78 @@ export default function CodeReviewChallenge() {
   // Move this hook call here so it's always called, before any early returns
   const { timers: allTimers, timeLefts: allTimeLefts } = useAllChallengeTimers();
 
-  // On mount, load user/admin from localStorage, and fetch locks from API
+  // On mount: ask the server who this browser's session cookie says we are
+  // (if anyone), and fetch locks/challenges. There is no client-side identity
+  // to restore — the httpOnly session cookie is the only source of truth.
   useEffect(() => {
-    const stored = localStorage.getItem("crc_user");
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        // Fetch actual score from backend
-        fetch('/api/leaderboard')
-          .then(res => res.json())
-          .then(users => {
-            const found = users.find((u: any) => u.name === parsed.name);
-            setUser({
-              name: parsed.name,
-              avatar: parsed.avatar,
-              score: found ? found.score : 0,
-            });
-          });
-      } catch (error) {
-        console.error('Error parsing stored user data:', error);
-        localStorage.removeItem("crc_user"); // Clear corrupted data
-        setShowNameModal(true);
-      }
-    } else setShowNameModal(true);
-    const admin = localStorage.getItem("crc_admin");
-    setIsAdmin(admin === "true");
+    fetch('/api/player-session')
+      .then(res => res.json())
+      .then(data => {
+        if (data.name) {
+          setUser({ name: data.name, avatar: data.avatar || "", score: data.score || 0 });
+        } else {
+          setShowNameModal(true);
+        }
+      })
+      .catch(() => setShowNameModal(true));
+
     // Fetch locks from API
     fetch('/api/challenge-locks')
       .then(res => res.json())
       .then(data => setLocks(data));
 
-    // Fetch challenges from API
+    // Fetch challenges from the public, answer-free API
     const fetchChallenges = async () => {
       try {
         setChallengesLoading(true);
-        console.log('Fetching challenges...');
-
-        // Test the API directly
-        const testResponse = await fetch('/api/admin/challenges');
-        console.log('Test response status:', testResponse.status);
-        console.log('Test response ok:', testResponse.ok);
-
-        const res = await fetch('/api/admin/challenges');
-        console.log('Challenges response status:', res.status);
-        console.log('Challenges response headers:', Object.fromEntries(res.headers.entries()));
+        const res = await fetch('/api/challenges');
         if (res.ok) {
           const data = await res.json();
-          console.log('Challenges data:', data);
-          console.log('Challenges data length:', data.length);
           setChallenges(data);
         } else {
-          const errorText = await res.text();
-          console.error('Failed to fetch challenges:', res.status, errorText);
+          console.error('Failed to fetch challenges:', res.status);
         }
       } catch (error) {
         console.error('Error fetching challenges:', error);
       } finally {
         setChallengesLoading(false);
-        console.log('Challenges loading finished');
       }
     };
 
     fetchChallenges();
   }, []); // Empty dependency array - only run once on mount
 
-  // Save user and admin state to localStorage
-  useEffect(() => {
-    if (user.name) localStorage.setItem("crc_user", JSON.stringify(user));
-  }, [user]);
-  useEffect(() => {
-    localStorage.setItem("crc_admin", isAdmin ? "true" : "false");
-  }, [isAdmin]);
-
-  const handleNameSubmit = (name: string) => {
-    setUser({ name, avatar: getRandomAvatar(), score: 0 });
-    setShowNameModal(false);
-  };
-
-  // Admin login/logout logic
-  const handleAdminLogin = () => {
-    setShowAdminModal(true);
-    setAdminError("");
-  };
-  const handleAdminLogout = () => {
-    setIsAdmin(false);
-  };
-  const handleAdminModalSubmit = (password: string) => {
-    if (password === "admin123") {
-      setIsAdmin(true);
-      setShowAdminModal(false);
-      setAdminError("");
-    } else {
-      setAdminError("Incorrect password");
+  const handleNameSubmit = async (name: string) => {
+    setClaimingName(true);
+    setClaimError("");
+    const avatar = getRandomAvatar();
+    try {
+      const res = await fetch('/api/player-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, avatar }),
+      });
+      if (res.ok) {
+        setUser({ name, avatar, score: 0 });
+        setShowNameModal(false);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setClaimError(data.error || 'Could not claim that name. Try another.');
+      }
+    } catch {
+      setClaimError('Could not reach the server. Try again.');
+    } finally {
+      setClaimingName(false);
     }
   };
 
-  // Challenge lock/unlock logic (persist to API)
-  const handleToggleLock = async (id: string) => {
-    // If currently locked (undefined or true), unlock (set to false). If unlocked (false), lock (set to true).
-    const isLocked = locks[id] !== false;
-    const newLocked = !isLocked;
-    setLocks(prev => ({ ...prev, [id]: newLocked })); // Optimistic update
-    await fetch('/api/challenge-locks', {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, locked: newLocked })
-    });
-    // Reset timer if locking the challenge
-    if (newLocked && isAdmin) {
-      const socket = io(SOCKET_URL, { transports: ['websocket'] });
-      socket.emit('admin:resetTimer', { challengeId: id });
-      socket.disconnect();
-    }
-    // Optionally, re-fetch locks from API for consistency
-    // const data = await fetch("/api/challenge-locks").then(res => res.json());
-    // setLocks(data);
-  };
+  // Locking/unlocking challenges is admin-only and lives entirely in
+  // /admin/dashboard now (backed by real session auth) — this page only reads locks.
 
-  const handleSelectChallenge = (challenge: Challenge) => {
+  const handleSelectChallenge = (challenge: PlayerChallenge) => {
     // By default, all challenges are locked unless explicitly unlocked
     const isLocked = locks[challenge.id] !== false;
-    if (!isAdmin && isLocked) return;
+    if (isLocked) return;
     setSelectedChallenge(challenge)
     setSelectedLines([])
     setSubmitted(false)
@@ -799,6 +724,9 @@ export default function CodeReviewChallenge() {
     setShowHints(false)
     setFlagInput("");
     setFlagChallengeStatus({ status: 'idle' });
+    setSubmissionFeedback([]);
+    setRevealedVulnerableLines([]);
+    setRevealedExplanations({});
   }
 
   // Check if user has already solved the selected challenge (challenge submission)
@@ -809,7 +737,6 @@ export default function CodeReviewChallenge() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            name: user.name,
             challengeId: selectedChallenge.id,
           }),
         });
@@ -831,7 +758,6 @@ export default function CodeReviewChallenge() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            name: user.name,
             challengeId: selectedChallenge.id,
           }),
         });
@@ -851,7 +777,7 @@ export default function CodeReviewChallenge() {
         const res = await fetch('/api/challenge-attempts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: user.name, challengeId: selectedChallenge.id })
+          body: JSON.stringify({ challengeId: selectedChallenge.id })
         });
         const data = await res.json();
         setAttemptsUsed(data.attemptsUsed);
@@ -873,31 +799,28 @@ export default function CodeReviewChallenge() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: user.name,
           avatar: user.avatar,
           challengeId: selectedChallenge.id,
           selectedLines: selectedLines,
         }),
       });
       const data = await res.json();
-      // Determine correctness: all vulnerable lines must be selected, and no extra lines
-      const vulnerableLines = selectedChallenge.vulnerableLines;
-      const selectedSet = new Set(selectedLines);
-      const vulnerableSet = new Set(vulnerableLines);
-      const allCorrect =
-        selectedLines.length === vulnerableLines.length &&
-        selectedLines.every((line) => vulnerableSet.has(line));
-      setLastSubmissionCorrect(allCorrect);
-      if (allCorrect) setAlreadySolved(true);
-      else setAlreadySolved(false);
+      // Correctness is determined entirely by the server; the client never has the answer key.
+      if (res.ok) {
+        setLastSubmissionCorrect(!!data.correct);
+        setAlreadySolved(!!data.correct);
+        setSubmissionFeedback(Array.isArray(data.feedback) ? data.feedback : []);
+        if (data.correct) {
+          setRevealedVulnerableLines(Array.isArray(data.vulnerableLines) ? data.vulnerableLines : []);
+          setRevealedExplanations(data.explanations || {});
+        }
+      } else {
+        setLastSubmissionCorrect(false);
+        setSubmissionFeedback([]);
+      }
       // Update attempts from backend response
       if (typeof data.attemptsUsed === 'number') setAttemptsUsed(data.attemptsUsed);
       if (typeof data.attemptsRemaining === 'number') setAttemptsRemaining(data.attemptsRemaining);
-      // Optionally, use data.feedback for per-line feedback if needed
-      // Optionally, update score or attempts from backend response
-      // setUser(u => ({ ...u, score: data.score }));
-      // setAttemptsUsed(data.attemptsUsed);
-      // setAttemptsRemaining(data.attemptsRemaining);
     }
   }
 
@@ -906,6 +829,7 @@ export default function CodeReviewChallenge() {
     setSubmitted(false)
     setShowResults(false)
     setShowHints(false)
+    setSubmissionFeedback([])
   }
 
   const handleBackToChallenges = () => {
@@ -917,6 +841,9 @@ export default function CodeReviewChallenge() {
     setOpenLabChallenge(null)
     setFlagInput("");
     setFlagChallengeStatus({ status: 'idle' });
+    setSubmissionFeedback([]);
+    setRevealedVulnerableLines([]);
+    setRevealedExplanations({});
   }
 
   const toggleLine = (lineNumber: number) => {
@@ -932,12 +859,9 @@ export default function CodeReviewChallenge() {
   }
 
   const getLineStatus = (lineNumber: number) => {
-    if (!showResults || !selectedChallenge) return null;
-    const isSelected = selectedLines.includes(lineNumber);
-    const isVulnerable = selectedChallenge.vulnerableLines.includes(lineNumber);
-    if (isSelected && isVulnerable) return "correct";
-    if (isSelected && !isVulnerable) return "incorrect";
-    return null;
+    if (!showResults) return null;
+    const feedback = submissionFeedback.find((f) => f.line === lineNumber);
+    return feedback ? feedback.status : null;
   }
 
   // Helper to refresh solved states for both challenge and flag
@@ -948,7 +872,6 @@ export default function CodeReviewChallenge() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: user.name,
           challengeId: selectedChallenge.id,
         }),
       })
@@ -959,7 +882,6 @@ export default function CodeReviewChallenge() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: user.name,
           challengeId: selectedChallenge.id,
         }),
       })
@@ -970,40 +892,14 @@ export default function CodeReviewChallenge() {
 
   // Show name modal if needed
   if (showNameModal) {
-    return <NameModal open={showNameModal} onSubmit={handleNameSubmit} />
-  }
-
-  // Show admin modal if needed
-  if (showAdminModal) {
-    return <AdminModal open={showAdminModal} onSubmit={handleAdminModalSubmit} onClose={() => setShowAdminModal(false)} error={adminError} />
-  }
-
-  // Show admin panel if admin
-  if (isAdmin && !selectedChallenge) {
-    console.log('Rendering admin panel with:', {
-      challengesLoading,
-      challengesLength: challenges?.length,
-      challenges: challenges
-    });
-    return (
-      <>
-        <UserBar name={user.name} avatar={user.avatar} score={user.score} isAdmin={isAdmin} onAdminLogout={handleAdminLogout} />
-        {challengesLoading ? (
-          <div className="min-h-screen bg-gray-50 p-4 flex items-center justify-center">
-            <div className="text-gray-500">Loading admin panel...</div>
-          </div>
-        ) : (
-          <AdminPanel locks={locks} onToggleLock={handleToggleLock} challenges={challenges} />
-        )}
-      </>
-    );
+    return <NameModal open={showNameModal} onSubmit={handleNameSubmit} submitting={claimingName} claimError={claimError} />
   }
 
   // Show challenge selection if no challenge is selected
   if (!selectedChallenge) {
     return (
       <>
-        <UserBar name={user.name} avatar={user.avatar} score={user.score} isAdmin={isAdmin} onAdminLogout={handleAdminLogout} />
+        <UserBar name={user.name} avatar={user.avatar} score={user.score} />
         <div className="min-h-screen bg-gray-50 p-4">
           <div className="max-w-4xl mx-auto space-y-6">
             <div className="text-center mb-8">
@@ -1032,7 +928,7 @@ export default function CodeReviewChallenge() {
                   // Special style for DEMO challenge
                   const demoCardClass = challenge.id === 'DEMO' ? 'bg-yellow-50 border-yellow-400 ring-2 ring-yellow-300' : '';
                   return (
-                    <Card key={challenge.id} className={`relative transition-shadow ${demoCardClass} ${locked && !isAdmin ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:shadow-lg'}`} onClick={() => handleSelectChallenge(challenge)}>
+                    <Card key={challenge.id} className={`relative transition-shadow ${demoCardClass} ${locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:shadow-lg'}`} onClick={() => handleSelectChallenge(challenge)}>
                       {/* Timer at bottom right if running or paused */}
                       {(timer && (timer.isRunning || timer.isPaused) && timeLeft > 0) && (
                         <div className="absolute bottom-3 right-3 z-10">
@@ -1056,7 +952,7 @@ export default function CodeReviewChallenge() {
                         <CardDescription className="mt-2">{challenge.description}</CardDescription>
                       </CardHeader>
                       <CardContent className="flex flex-col gap-2 items-start justify-between">
-                        {locked && !isAdmin && <span className="ml-2 text-xs text-gray-400">Locked</span>}
+                        {locked && <span className="ml-2 text-xs text-gray-400">Locked</span>}
                         {!locked && !isOpenLab && (
                           <Button variant="default" onClick={() => { setOpenLabChallenge(challenge.id); setFlagInput(""); setFlagStatus({ status: 'idle' }); }}>
                             Open
@@ -1081,18 +977,12 @@ export default function CodeReviewChallenge() {
     )
   }
 
-  // Challenge view
-  const codeLines = selectedChallenge.code.split("\n")
-  const correctAnswers = selectedLines.filter((line) => selectedChallenge.vulnerableLines.includes(line)).length
-  const totalVulnerabilities = selectedChallenge.vulnerableLines.length
-  const incorrectSelections = selectedLines.filter((line) => !selectedChallenge.vulnerableLines.includes(line)).length
-
   // In the challenge view, add a check for locked
   const isLocked = locks[selectedChallenge.id] !== false;
 
   return (
     <>
-      <UserBar name={user.name} avatar={user.avatar} score={user.score} isAdmin={isAdmin} onAdminLogout={handleAdminLogout} />
+      <UserBar name={user.name} avatar={user.avatar} score={user.score} />
       <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-6xl mx-auto space-y-6">
           <div className="flex flex-col md:flex-row md:items-start md:gap-6">
@@ -1188,7 +1078,7 @@ export default function CodeReviewChallenge() {
                                 </a>
                               );
                             })()}
-                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || (isLocked && !isAdmin)}>
+                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || isLocked}>
                               Submit Answer
                             </Button>
                           </div>
@@ -1207,14 +1097,14 @@ export default function CodeReviewChallenge() {
                         <form
                           onSubmit={async (e) => {
                             e.preventDefault();
-                            if (!flagInput.trim() || flagAlreadySolved || (isLocked && !isAdmin)) return;
+                            if (!flagInput.trim() || flagAlreadySolved || isLocked) return;
                             setFlagChallengeLoading(true);
                             setFlagChallengeStatus({ status: 'loading' });
                             try {
                               const res = await fetch('/api/submit-flag', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ challengeId: selectedChallenge.id, flag: flagInput.trim(), name: user.name }),
+                                body: JSON.stringify({ challengeId: selectedChallenge.id, flag: flagInput.trim() }),
                               });
                               const data = await res.json();
                               if (res.status === 423) {
@@ -1243,13 +1133,13 @@ export default function CodeReviewChallenge() {
                             placeholder="Flag here"
                             value={flagInput}
                             onChange={e => setFlagInput(e.target.value)}
-                            disabled={flagChallengeLoading || flagAlreadySolved || (isLocked && !isAdmin)}
+                            disabled={flagChallengeLoading || flagAlreadySolved || isLocked}
                           />
                           <Button
                             type="submit"
                             className="ml-2 h-full bg-green-100 text-green-700 hover:bg-green-200 border-green-200"
                             variant="outline"
-                            disabled={flagChallengeLoading || !flagInput.trim() || flagAlreadySolved || (isLocked && !isAdmin)}
+                            disabled={flagChallengeLoading || !flagInput.trim() || flagAlreadySolved || isLocked}
                           >
                             {flagChallengeLoading ? 'Submitting...' : 'Submit Flag'}
                           </Button>
@@ -1337,23 +1227,12 @@ export default function CodeReviewChallenge() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    {/* <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div className="text-center p-4 bg-green-50 rounded-lg">
-                        <div className="text-2xl font-bold text-green-600">{correctAnswers}</div>
-                        <div className="text-sm text-green-700">Correct</div>
-                      </div>
-                      <div className="text-center p-4 bg-red-50 rounded-lg">
-                        <div className="text-2xl font-bold text-red-600">{incorrectSelections}</div>
-                        <div className="text-sm text-red-700">Incorrect</div>
-                      </div>
-                    </div> */}
-
                     <div className="space-y-3">
                       <div className="space-y-2">
-                        {selectedChallenge.vulnerableLines.map((lineNumber) => (
+                        {revealedVulnerableLines.map((lineNumber) => (
                           <div key={lineNumber} className="p-3 bg-red-50 border-l-4 border-red-400 rounded">
                             <p className="font-medium text-red-800">Line {lineNumber}: Vulnerability Found</p>
-                            <p className="text-sm text-red-700">{selectedChallenge.explanations[lineNumber]}</p>
+                            <p className="text-sm text-red-700">{revealedExplanations[lineNumber]}</p>
                           </div>
                         ))}
                       </div>

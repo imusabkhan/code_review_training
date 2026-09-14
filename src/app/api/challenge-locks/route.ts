@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { PrismaClient } from '@/generated/prisma';
+import { prisma } from '@/lib/prisma';
 import { isAdminSession } from '@/lib/isAdminSession';
 
-const prisma = new PrismaClient();
-
-// GET: Return all challenge lock states
+// GET: Return all challenge lock states (public — players need this to know what's playable)
 export async function GET() {
   try {
     const locks = await prisma.challengeLock.findMany();
@@ -17,14 +15,12 @@ export async function GET() {
   }
 }
 
-// POST: Update lock state for a challenge
+// POST: Update lock state for a challenge (admin only)
 export async function POST(req: NextRequest) {
+  if (!(await isAdminSession(req))) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
   try {
-    // Temporarily bypass session check for development
-    // if (!(await isAdminSession(req))) {
-    //   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    // }
-
     const { id, locked } = await req.json();
     if (typeof id !== 'string' || typeof locked !== 'boolean') {
       return NextResponse.json({ error: 'Invalid payload' }, { status: 400 });
@@ -41,4 +37,4 @@ export async function POST(req: NextRequest) {
     console.error('Error updating challenge lock:', error);
     return NextResponse.json({ error: 'Failed to update lock' }, { status: 500 });
   }
-} 
+}

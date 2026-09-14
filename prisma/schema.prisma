@@ -8,8 +8,9 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled connection, used by the app at runtime
+  directUrl = env("DIRECT_URL")   // direct connection, used only by Prisma Migrate
 }
 
 model ChallengeLock {
@@ -40,4 +41,18 @@ model FlagSubmission {
   flag        String
   correct     Boolean
   createdAt   DateTime @default(now())
+}
+
+model Challenge {
+  id                 String  @id
+  title              String
+  description        String
+  code               String
+  vulnerableLines    String // JSON array of line numbers, e.g. "[3,9]"
+  difficulty         String
+  hints              String? // JSON array of strings
+  explanations       String // JSON object of { [lineNumber]: string }
+  flag               String?
+  labUrl             String?
+  maxSelectableLines Int?
 }

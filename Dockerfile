@@ -26,17 +26,18 @@ RUN npm run build:next
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Set proper permissions for database directory
-RUN mkdir -p prisma && \
-    chown -R nextjs:nodejs prisma
-
 # Set environment variables
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
-ENV DATABASE_URL="file:./prisma/dev.db"
-ENV ADMIN_SESSION_SECRET="your-super-secret-admin-session-key-at-least-32-chars"
 ENV NEXT_PUBLIC_SOCKET_URL="http://localhost:4001"
+
+# DATABASE_URL, DIRECT_URL, ADMIN_PASSWORD, and ADMIN_SESSION_SECRET are NOT baked into
+# the image. They must be supplied at `docker run` time (-e DATABASE_URL=..., etc.) so
+# every deployment gets its own database and its own secrets instead of sharing the ones
+# baked into this publicly-distributed image. DIRECT_URL is required — the startup
+# command below runs `prisma migrate deploy`, which needs a direct (non-pooled)
+# connection. See .env.local.example.
 
 # Switch to non-root user
 USER nextjs
@@ -48,5 +49,5 @@ EXPOSE 4001
 # Use dumb-init as PID 1
 ENTRYPOINT ["dumb-init", "--"]
 
-# Create startup script to initialize database and start the application
-CMD ["sh", "-c", "npx prisma db push && npm run start:prod"]
+# Apply committed migrations (no interactive prompts, no schema diffing) and start
+CMD ["sh", "-c", "npx prisma migrate deploy && npm run start:prod"]

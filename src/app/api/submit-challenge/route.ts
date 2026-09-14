@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { challenges } from '@/data/challenges';
-
-import { PrismaClient } from '@/generated/prisma'
-
-const prisma = new PrismaClient()
+import { prisma } from '@/lib/prisma';
+import { getPlayerName } from '@/lib/playerSession';
+import { MAX_CHALLENGE_ATTEMPTS } from '@/lib/constants';
 
 export async function POST(req: NextRequest) {
-  const { name, avatar, challengeId, selectedLines } = await req.json();
+  const { avatar, challengeId, selectedLines } = await req.json();
   if (
-    typeof name !== 'string' ||
     typeof avatar !== 'string' ||
     typeof challengeId !== 'string' ||
     !Array.isArray(selectedLines) ||
@@ -17,11 +14,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid payload' }, { status: 400 });
   }
 
+  // Identity comes from the signed session cookie, never the request body —
+  // otherwise anyone could submit (or burn attempts) under another player's name.
+  const name = await getPlayerName(req);
+  if (!name) {
+    return NextResponse.json({ error: 'Not signed in' }, { status: 401 });
+  }
+
   // Find the challenge
-  const challenge = challenges.find((c) => c.id === challengeId);
-  if (!challenge) {
+  const challengeRow = await prisma.challenge.findUnique({ where: { id: challengeId } });
+  if (!challengeRow) {
     return NextResponse.json({ error: 'Challenge not found' }, { status: 404 });
   }
+  const vulnerableLines: number[] = JSON.parse(challengeRow.vulnerableLines);
+  const explanations: Record<number, string> = JSON.parse(challengeRow.explanations);
 
   // Check if challenge is locked
   const lock = await prisma.challengeLock.findUnique({ where: { id: challengeId } });
@@ -30,12 +36,11 @@ export async function POST(req: NextRequest) {
   }
 
   // Enforce maxSelectableLines
-  if (typeof challenge.maxSelectableLines === 'number' && selectedLines.length > challenge.maxSelectableLines) {
-    return NextResponse.json({ error: `You can select at most ${challenge.maxSelectableLines} lines for this challenge.` }, { status: 400 });
+  if (typeof challengeRow.maxSelectableLines === 'number' && selectedLines.length > challengeRow.maxSelectableLines) {
+    return NextResponse.json({ error: `You can select at most ${challengeRow.maxSelectableLines} lines for this challenge.` }, { status: 400 });
   }
 
   // Validate the answer: all and only vulnerable lines must be selected
-  const vulnerableLines = challenge.vulnerableLines;
   const selectedSet = new Set(selectedLines);
   const vulnerableSet = new Set(vulnerableLines);
   const allCorrect =
@@ -67,7 +72,7 @@ export async function POST(req: NextRequest) {
   const attempts = await prisma.challengeSubmission.count({
     where: { userName: name, challengeId },
   });
-  const maxAttempts = 4;
+  const maxAttempts = MAX_CHALLENGE_ATTEMPTS;
   const attemptsRemaining = Math.max(0, maxAttempts - attempts);
 
   if (attempts >= maxAttempts) {
@@ -117,5 +122,7 @@ export async function POST(req: NextRequest) {
     attemptsUsed: attemptsAfter,
     attemptsRemaining: Math.max(0, maxAttempts - attemptsAfter),
     feedback,
+    // Only reveal the answer key once it's actually been earned.
+    ...(allCorrect ? { vulnerableLines, explanations } : {}),
   });
-} 
+}
