@@ -21,19 +21,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Not signed in' }, { status: 401 });
   }
 
-  // Find the challenge
-  const challengeRow = await prisma.challenge.findUnique({ where: { id: challengeId } });
+  // Challenge + lock are independent reads — fetch them together instead of
+  // sequentially. This route is on the hot path (every submit), and each extra
+  // round trip to the DB is directly felt as UI lag.
+  const [challengeRow, lock] = await Promise.all([
+    prisma.challenge.findUnique({ where: { id: challengeId } }),
+    prisma.challengeLock.findUnique({ where: { id: challengeId } }),
+  ]);
   if (!challengeRow) {
     return NextResponse.json({ error: 'Challenge not found' }, { status: 404 });
   }
-  const vulnerableLines: number[] = JSON.parse(challengeRow.vulnerableLines);
-  const explanations: Record<number, string> = JSON.parse(challengeRow.explanations);
-
-  // Check if challenge is locked
-  const lock = await prisma.challengeLock.findUnique({ where: { id: challengeId } });
   if (lock && lock.locked) {
     return NextResponse.json({ error: 'Challenge is locked' }, { status: 423 });
   }
+  const vulnerableLines: number[] = JSON.parse(challengeRow.vulnerableLines);
+  const explanations: Record<number, string> = JSON.parse(challengeRow.explanations);
 
   // Enforce maxSelectableLines
   if (typeof challengeRow.maxSelectableLines === 'number' && selectedLines.length > challengeRow.maxSelectableLines) {
@@ -41,7 +43,6 @@ export async function POST(req: NextRequest) {
   }
 
   // Validate the answer: all and only vulnerable lines must be selected
-  const selectedSet = new Set(selectedLines);
   const vulnerableSet = new Set(vulnerableLines);
   const allCorrect =
     selectedLines.length === vulnerableLines.length &&
@@ -52,29 +53,20 @@ export async function POST(req: NextRequest) {
     if (vulnerableSet.has(line)) return { line, status: 'correct' };
     return { line, status: 'incorrect' };
   });
-// (No missed lines in feedback)
 
-  // Check if user already solved this challenge correctly
-  if (allCorrect) {
-    const alreadySolved = await prisma.challengeSubmission.findFirst({
-      where: {
-        userName: name,
-        challengeId,
-        correct: true,
-      },
-    });
-    if (alreadySolved) {
-      return NextResponse.json({ error: 'Challenge already solved', alreadySolved: true }, { status: 403 });
-    }
+  // Already-solved check (only relevant if this submission would otherwise score) and
+  // the attempts count are independent reads — run them together.
+  const [alreadySolved, attempts] = await Promise.all([
+    allCorrect
+      ? prisma.challengeSubmission.findFirst({ where: { userName: name, challengeId, correct: true } })
+      : Promise.resolve(null),
+    prisma.challengeSubmission.count({ where: { userName: name, challengeId } }),
+  ]);
+  if (allCorrect && alreadySolved) {
+    return NextResponse.json({ error: 'Challenge already solved', alreadySolved: true }, { status: 403 });
   }
 
-  // Count attempts for this user/challenge
-  const attempts = await prisma.challengeSubmission.count({
-    where: { userName: name, challengeId },
-  });
   const maxAttempts = MAX_CHALLENGE_ATTEMPTS;
-  const attemptsRemaining = Math.max(0, maxAttempts - attempts);
-
   if (attempts >= maxAttempts) {
     return NextResponse.json({
       error: 'No attempts remaining',
@@ -83,38 +75,31 @@ export async function POST(req: NextRequest) {
     }, { status: 403 });
   }
 
-  // Store the submission (store selectedLines as JSON)
-  await prisma.challengeSubmission.create({
-    data: {
-      userName: name,
-      challengeId,
-      selectedLines: JSON.stringify(selectedLines),
-      correct: allCorrect,
-    },
-  });
-
-  // Re-count attempts after the new submission
-  const attemptsAfter = await prisma.challengeSubmission.count({
-    where: { userName: name, challengeId },
-  });
-
-  // Update the leaderboard score if correct
-  let user;
-  if (allCorrect) {
-    // +1 for correct
-    user = await prisma.leaderboardUser.upsert({
-      where: { name },
-      update: { score: { increment: 1 }, avatar },
-      create: { name, avatar, score: 1 },
-    });
-  } else {
-    // No penalty for incorrect answers; just return the current score
-    user = await prisma.leaderboardUser.findUnique({ where: { name } });
-    // If user doesn't exist yet, create with score 0
-    if (!user) {
-      user = await prisma.leaderboardUser.create({ data: { name, avatar, score: 0 } });
-    }
-  }
+  // Store the submission and update the leaderboard in parallel — different tables,
+  // neither depends on the other's result. (No extra re-count needed afterward: we
+  // already know exactly one more submission now exists for this user/challenge.)
+  const [, user] = await Promise.all([
+    prisma.challengeSubmission.create({
+      data: {
+        userName: name,
+        challengeId,
+        selectedLines: JSON.stringify(selectedLines),
+        correct: allCorrect,
+      },
+    }),
+    allCorrect
+      ? prisma.leaderboardUser.upsert({
+          where: { name },
+          update: { score: { increment: 1 }, avatar },
+          create: { name, avatar, score: 1 },
+        })
+      : prisma.leaderboardUser.upsert({
+          where: { name },
+          update: { avatar },
+          create: { name, avatar, score: 0 },
+        }),
+  ]);
+  const attemptsAfter = attempts + 1;
 
   return NextResponse.json({
     correct: allCorrect,

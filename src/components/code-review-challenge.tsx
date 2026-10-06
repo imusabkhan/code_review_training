@@ -443,21 +443,30 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
   );
 }
 
-function Leaderboard({ currentUser }: { currentUser: { name: string; avatar: string; score: number } }) {
+function Leaderboard({ currentUser, refreshSignal }: { currentUser: { name: string; avatar: string; score: number }; refreshSignal?: number }) {
   const [users, setUsers] = useState<{ name: string; avatar: string; score: number }[]>([]);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Fetch leaderboard on mount and every 5 seconds
+  const fetchLeaderboard = useCallback(() => {
+    fetch('/api/leaderboard')
+      .then(res => res.json())
+      .then(setUsers);
+  }, []);
+
+  // Poll every 5 seconds for ambient updates from OTHER players
   useEffect(() => {
-    const fetchLeaderboard = () => {
-      fetch('/api/leaderboard')
-        .then(res => res.json())
-        .then(setUsers);
-    };
     fetchLeaderboard();
     intervalRef.current = setInterval(fetchLeaderboard, 5000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, []);
+  }, [fetchLeaderboard]);
+
+  // Refetch immediately when the parent bumps this after OUR OWN score just
+  // changed — otherwise the player could wait up to 5s to see their own new
+  // score/rank after a correct submission, which reads as "nothing happened."
+  useEffect(() => {
+    if (refreshSignal === undefined || refreshSignal === 0) return;
+    fetchLeaderboard();
+  }, [refreshSignal, fetchLeaderboard]);
 
   // If current user is not in the top, show them at the bottom
   const inTop = users.some(u => u.name === currentUser.name);
@@ -757,6 +766,9 @@ export default function CodeReviewChallenge() {
   // User state — identity lives in a server-issued session cookie (see
   // /api/player-session), never in localStorage or anything client-trusted.
   const [user, setUser] = useState({ name: "", avatar: "", score: 0 });
+  // Bumped whenever OUR OWN score just changed, so the Leaderboard widget can
+  // refetch immediately instead of waiting for its 5s ambient poll.
+  const [leaderboardRefreshSignal, setLeaderboardRefreshSignal] = useState(0);
   const [showNameModal, setShowNameModal] = useState(false);
   const [claimingName, setClaimingName] = useState(false);
   const [claimError, setClaimError] = useState("");
@@ -788,6 +800,11 @@ export default function CodeReviewChallenge() {
 
   // Track if the last submission was correct
   const [lastSubmissionCorrect, setLastSubmissionCorrect] = useState<boolean | null>(null);
+  // Result indicator shown inline in the Submit/Try Again row — shows instantly on click
+  // (before the server even responds) so submitting never feels like it did nothing, then
+  // flips to the actual result. Lives in that row specifically so it never shifts layout;
+  // stays visible until the next attempt/challenge/reset instead of auto-dismissing.
+  const [submitToast, setSubmitToast] = useState<{ status: 'checking' | 'correct' | 'incorrect' } | null>(null);
   // Per-line correct/incorrect feedback for the lines the user selected (server-authoritative)
   const [submissionFeedback, setSubmissionFeedback] = useState<{ line: number; status: string }[]>([]);
   // The answer key, only populated once the server reveals it after a correct submission
@@ -961,6 +978,8 @@ export default function CodeReviewChallenge() {
     setSubmitted(true);
     setShowResults(true);
     if (selectedChallenge && selectedLines.length > 0) {
+      setSubmitToast({ status: 'checking' }); // instant feedback — don't wait on the network for this
+
       // Send selectedLines array to backend
       const res = await fetch('/api/submit-challenge', {
         method: "POST",
@@ -980,10 +999,16 @@ export default function CodeReviewChallenge() {
         if (data.correct) {
           setRevealedVulnerableLines(Array.isArray(data.vulnerableLines) ? data.vulnerableLines : []);
           setRevealedExplanations(data.explanations || {});
+          // Score is already in the response — no need to wait on anything else
+          // to reflect it, both on our own badge and on the shared leaderboard.
+          if (typeof data.score === 'number') setUser(u => ({ ...u, score: data.score }));
+          setLeaderboardRefreshSignal(s => s + 1);
         }
+        setSubmitToast({ status: data.correct ? 'correct' : 'incorrect' });
       } else {
         setLastSubmissionCorrect(false);
         setSubmissionFeedback([]);
+        setSubmitToast({ status: 'incorrect' });
       }
       // Update attempts from backend response
       if (typeof data.attemptsUsed === 'number') setAttemptsUsed(data.attemptsUsed);
@@ -997,6 +1022,7 @@ export default function CodeReviewChallenge() {
     setShowResults(false)
     setShowHints(false)
     setSubmissionFeedback([])
+    setSubmitToast(null)
   }
 
   const handleBackToChallenges = () => {
@@ -1011,6 +1037,7 @@ export default function CodeReviewChallenge() {
     setSubmissionFeedback([]);
     setRevealedVulnerableLines([]);
     setRevealedExplanations({});
+    setSubmitToast(null);
   }
 
   const toggleLine = (lineNumber: number) => {
@@ -1279,7 +1306,9 @@ export default function CodeReviewChallenge() {
                                 showLineNumbers
                                 wrapLines
                                 lineProps={(lineNumber: number) => ({
-                                  className: revealData?.vulnerableLines.includes(lineNumber) ? 'bg-red-900/50' : '',
+                                  className: revealData?.vulnerableLines.includes(lineNumber)
+                                    ? 'bg-red-900/50 border-l-2 border-red-400'
+                                    : 'opacity-35 transition-opacity',
                                 })}
                                 lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
                               >
@@ -1320,7 +1349,27 @@ export default function CodeReviewChallenge() {
                     </div>
 
                     <div className="mt-4 flex items-center justify-between">
-                      <div className="flex gap-4">
+                      {/* Result indicator lives right next to the Submit/Try Again button —
+                          same row, so it's immediately in view without shifting anything. */}
+                      <div className="flex items-center gap-2">
+                        {submitToast?.status === 'checking' && (
+                          <span className="flex items-center gap-2 text-sm font-semibold text-gray-600 animate-fade-in">
+                            <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+                            Checking…
+                          </span>
+                        )}
+                        {submitToast?.status === 'incorrect' && (
+                          <span className="flex items-center gap-2 rounded-full border-2 border-red-400 bg-red-100 px-3 py-1.5 text-sm font-bold text-red-700 animate-fade-in">
+                            <XCircle className="h-4 w-4 shrink-0" />
+                            Not the vulnerable line{attemptsRemaining > 0 ? ` — ${attemptsRemaining} left` : ''}
+                          </span>
+                        )}
+                        {submitToast?.status === 'correct' && (
+                          <span className="flex items-center gap-2 rounded-full border-2 border-green-400 bg-green-100 px-3 py-1.5 text-sm font-bold text-green-700 animate-fade-in">
+                            <CheckCircle className="h-4 w-4 shrink-0" />
+                            Correct!
+                          </span>
+                        )}
                       </div>
 
                       <div className="space-x-2">
@@ -1381,6 +1430,7 @@ export default function CodeReviewChallenge() {
                               } else if (data.success && data.correct) {
                                 setFlagChallengeStatus({ status: 'success', message: data.alreadySolved ? 'Already solved!' : 'Correct flag! +5 points' });
                                 setUser(u => ({ ...u, score: data.score }));
+                                if (!data.alreadySolved) setLeaderboardRefreshSignal(s => s + 1);
                                 refreshSolvedStates();
                               } else if (data.success && data.alreadySolved) {
                                 setFlagChallengeStatus({ status: 'already', message: 'Already solved!' });
@@ -1512,7 +1562,7 @@ export default function CodeReviewChallenge() {
             </div>
             {/* Leaderboard on the right */}
             <div className="w-full mt-24 md:w-[400px] flex-shrink-0 md:self-start">
-              <Leaderboard currentUser={user} />
+              <Leaderboard currentUser={user} refreshSignal={leaderboardRefreshSignal} />
             </div>
           </div>
         </div>
