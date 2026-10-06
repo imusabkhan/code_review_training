@@ -811,9 +811,12 @@ export default function CodeReviewChallenge() {
   const [revealedVulnerableLines, setRevealedVulnerableLines] = useState<number[]>([]);
   const [revealedExplanations, setRevealedExplanations] = useState<Record<number, string>>({});
 
-  // Attempts state
-  const [attemptsUsed, setAttemptsUsed] = useState(0);
-  const [attemptsRemaining, setAttemptsRemaining] = useState(4);
+  // Attempts state — null means "not loaded yet for this challenge", deliberately
+  // NOT defaulted to the max (4). Showing a hardcoded 4 while the real count loads
+  // is exactly what caused the "flashes 4, then resets" glitch: whatever stale/
+  // wrong number was on screen gets visibly corrected a moment later.
+  const [attemptsUsed, setAttemptsUsed] = useState<number | null>(null);
+  const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
 
   // Open Lab state
   const [openLabChallenge, setOpenLabChallenge] = useState<string | null>(null);
@@ -911,6 +914,10 @@ export default function CodeReviewChallenge() {
     setSubmissionFeedback([]);
     setRevealedVulnerableLines([]);
     setRevealedExplanations({});
+    // Reset to "unknown" immediately — don't let the previous challenge's attempt
+    // count (or an old default) linger on screen while this one's real count loads.
+    setAttemptsUsed(null);
+    setAttemptsRemaining(null);
   }
 
   // Check if user has already solved the selected challenge (challenge submission)
@@ -1201,7 +1208,9 @@ export default function CodeReviewChallenge() {
                         </CardTitle>
                         <CardDescription className="mt-2 text-sm">{selectedChallenge.description}</CardDescription>
                       </div>
-                      <span className="flex bg-blue-100 text-blue-800 text-sm font-semibold px-2 py-1 w-28 rounded-full items-center">Attempts: {attemptsRemaining}</span>
+                      <span className="flex bg-blue-100 text-blue-800 text-sm font-semibold px-2 py-1 w-28 rounded-full items-center">
+                        Attempts: {attemptsRemaining === null ? '…' : attemptsRemaining}
+                      </span>
                     </div>
                   </CardHeader>
                   <CardContent>
@@ -1257,7 +1266,7 @@ export default function CodeReviewChallenge() {
                         style={{ width: `${CODE_PANEL_COUNT * 100}%`, transform: `translateX(-${codePanelIndex * (100 / CODE_PANEL_COUNT)}%)` }}
                       >
                         {/* Panel 1: vulnerable code — no label, this is the challenge itself */}
-                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%` }}>
+                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto overflow-y-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%`, height: 480 }}>
                           <SyntaxHighlighter
                             language="javascript"
                             style={oneDark}
@@ -1294,7 +1303,7 @@ export default function CodeReviewChallenge() {
                         {/* Panel 2: exact vulnerability — the real vulnerable lines highlighted,
                             read-only (no click-to-select, this isn't scored), with explanations
                             so the walkthrough can happen right here instead of switching to slides */}
-                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%` }}>
+                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto overflow-y-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%`, height: 480 }}>
                           {revealLoading ? (
                             <div className="py-8 text-center text-sm text-gray-400">Loading…</div>
                           ) : (
@@ -1306,9 +1315,7 @@ export default function CodeReviewChallenge() {
                                 showLineNumbers
                                 wrapLines
                                 lineProps={(lineNumber: number) => ({
-                                  className: revealData?.vulnerableLines.includes(lineNumber)
-                                    ? 'bg-red-900/50 border-l-2 border-red-400'
-                                    : 'opacity-35 transition-opacity',
+                                  className: revealData?.vulnerableLines.includes(lineNumber) ? 'bg-red-900/50' : '',
                                 })}
                                 lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
                               >
@@ -1326,7 +1333,7 @@ export default function CodeReviewChallenge() {
                           )}
                         </div>
                         {/* Panel 3: fixed / secure code */}
-                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%` }}>
+                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto overflow-y-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%`, height: 480 }}>
                           {revealLoading ? (
                             <div className="py-8 text-center text-sm text-gray-400">Loading…</div>
                           ) : revealData?.fixedCode ? (
@@ -1361,7 +1368,7 @@ export default function CodeReviewChallenge() {
                         {submitToast?.status === 'incorrect' && (
                           <span className="flex items-center gap-2 rounded-full border-2 border-red-400 bg-red-100 px-3 py-1.5 text-sm font-bold text-red-700 animate-fade-in">
                             <XCircle className="h-4 w-4 shrink-0" />
-                            Not the vulnerable line{attemptsRemaining > 0 ? ` — ${attemptsRemaining} left` : ''}
+                            Not the vulnerable line{attemptsRemaining !== null && attemptsRemaining > 0 ? ` — ${attemptsRemaining} left` : ''}
                           </span>
                         )}
                         {submitToast?.status === 'correct' && (
@@ -1396,7 +1403,7 @@ export default function CodeReviewChallenge() {
                                 </a>
                               );
                             })()}
-                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || isLocked}>
+                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || attemptsRemaining === null || isLocked}>
                               Submit Answer
                             </Button>
                           </div>
