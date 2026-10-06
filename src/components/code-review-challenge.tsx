@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, Lightbulb, Lock, Unlock } from "lucide-react"
+import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, Lightbulb, Lock, Unlock, ChevronLeft, ChevronRight } from "lucide-react"
 import type { PlayerChallenge, ChallengeSummary } from "@/types/challenge"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -183,6 +183,8 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
   const [timerDurations, setTimerDurations] = useState<Record<string, number>>({});
   const [timers, setTimers] = useState<Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number }>>({});
   const [timeLefts, setTimeLefts] = useState<Record<string, number>>({});
+  const [fixRevealedMap, setFixRevealedMap] = useState<Record<string, boolean>>({});
+  const [reorderingId, setReorderingId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
   // Debug logging
@@ -207,8 +209,18 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
       }));
     };
     socket.on('timer:update', handleTimerUpdate);
+    const handleFixReveal = (data: { challengeId: string }) => {
+      setFixRevealedMap(prev => ({ ...prev, [data.challengeId]: true }));
+    };
+    const handleFixHide = (data: { challengeId: string }) => {
+      setFixRevealedMap(prev => ({ ...prev, [data.challengeId]: false }));
+    };
+    socket.on('fix:reveal', handleFixReveal);
+    socket.on('fix:hide', handleFixHide);
     return () => {
       socket.off('timer:update', handleTimerUpdate);
+      socket.off('fix:reveal', handleFixReveal);
+      socket.off('fix:hide', handleFixHide);
     };
   }, []);
 
@@ -249,10 +261,17 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
   };
 
   const handleReset = async () => {
-    if (!window.confirm('Are you sure you want to reset everything? This cannot be undone.')) return;
+    if (!window.confirm('Are you sure you want to reset everything? This clears all participant scores/submissions AND every active timer and fix-reveal — perfect for wiping a demo/mock run before the real session. This cannot be undone.')) return;
     setResetting(true);
     setResetSuccess(false);
     const res = await fetch('/api/admin-reset', { method: 'POST' });
+    // Clear every live timer and fix-reveal too — the DB reset above doesn't touch
+    // the socket server's in-memory state, so without this a demo run's timers
+    // would still be ticking (or fixes still revealed) when the real session starts.
+    socketRef.current?.emit('admin:resetAll');
+    setTimers({});
+    setTimeLefts({});
+    setFixRevealedMap({});
     setResetting(false);
     if (res.ok) setResetSuccess(true);
   };
@@ -278,6 +297,27 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
     });
   };
 
+  const handleRevealFix = (challengeId: string) => {
+    socketRef.current?.emit('admin:revealFix', { challengeId });
+  };
+  const handleHideFix = (challengeId: string) => {
+    socketRef.current?.emit('admin:hideFix', { challengeId });
+  };
+
+  const handleQuickReorder = async (challengeId: string, newOrder: number) => {
+    if (Number.isNaN(newOrder)) return;
+    setReorderingId(challengeId);
+    try {
+      await fetch(`/api/admin/challenges/${challengeId}/order`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: newOrder }),
+      });
+    } finally {
+      setReorderingId(null);
+    }
+  };
+
   // Call this when a challenge is locked
   useEffect(() => {
     Object.entries(locks).forEach(([challengeId, locked]) => {
@@ -295,15 +335,15 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
         <Button variant="destructive" onClick={handleReset} disabled={resetting}>
           {resetting ? 'Resetting...' : 'Reset Everything'}
         </Button>
-        {resetSuccess && <span className="ml-4 text-green-700 font-semibold">Database reset!</span>}
+        {resetSuccess && <span className="ml-4 text-green-700 font-semibold">Lab fully reset — scores, submissions, timers, and reveals all cleared!</span>}
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4">
         {!challenges || challenges.length === 0 ? (
-          <div className="col-span-2 text-center py-8">
+          <div className="text-center py-8">
             <div className="text-gray-500">Loading challenges...</div>
           </div>
         ) : (
-          challenges.map((challenge) => {
+          [...challenges].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.id.localeCompare(b.id)).map((challenge) => {
             const isLocked = locks[challenge.id] !== false; // default locked
             const timeLeft = getTimeLeft(challenge.id);
             const timer = timers[challenge.id];
@@ -313,6 +353,20 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
                   <CardTitle className="flex items-center gap-2">
                     {isLocked ? <Lock className="h-4 w-4 text-gray-400" /> : <Unlock className="h-4 w-4 text-green-500" />}
                     {challenge.title}
+                    <span className="ml-auto flex items-center gap-1 text-xs font-normal text-gray-500" title="Position in the lab sequence">
+                      Sequence
+                      <input
+                        type="number"
+                        defaultValue={challenge.order ?? 0}
+                        disabled={reorderingId === challenge.id}
+                        onBlur={(e) => {
+                          const newOrder = parseInt(e.target.value, 10);
+                          if (newOrder !== (challenge.order ?? 0)) handleQuickReorder(challenge.id, newOrder);
+                        }}
+                        className="w-14 border rounded px-1.5 py-0.5 text-sm font-mono"
+                      />
+                      {reorderingId === challenge.id && <span className="text-gray-400">Saving…</span>}
+                    </span>
                   </CardTitle>
                   <CardDescription>{challenge.description}</CardDescription>
                 </CardHeader>
@@ -340,7 +394,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
                         )}
                       </div>
                       {!isLocked && (
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           {timer && timer.isRunning && !timer.isPaused ? (
                             <>
                               <Button variant="secondary" onClick={() => handlePauseTimer(challenge.id)}>
@@ -366,6 +420,15 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
                           )}
                           {/* Timer display for admin: show if running or paused and time left > 0 */}
                           {(timer && (timer.isRunning || timer.isPaused) && timeLeft > 0) && <TimerDisplay timeLeft={timeLeft} />}
+                          {fixRevealedMap[challenge.id] ? (
+                            <Button variant="outline" size="sm" onClick={() => handleHideFix(challenge.id)}>
+                              Hide Fix (room-wide)
+                            </Button>
+                          ) : (
+                            <Button variant="outline" size="sm" onClick={() => handleRevealFix(challenge.id)}>
+                              Reveal Fix (room-wide)
+                            </Button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -515,9 +578,7 @@ function ResizableCard({ children, defaultWidth = 0 }: { children: React.ReactNo
 }
 
 // --- ChallengeTimer component ---
-function ChallengeTimer({ selectedChallenge }: { selectedChallenge: PlayerChallenge }) {
-  const { timeLeft } = useChallengeTimer(selectedChallenge);
-
+function ChallengeTimer({ timeLeft }: { timeLeft: number }) {
   if (timeLeft > 0) {
     return <TimerDisplay timeLeft={timeLeft} />;
   }
@@ -528,6 +589,110 @@ function ChallengeTimer({ selectedChallenge }: { selectedChallenge: PlayerChalle
       No Timer
     </span>
   );
+}
+
+// --- Fixed-code reveal ---
+// Slides the code card from the vulnerable version to the fixed/secure version so
+// a presenter never has to leave this screen. The lab timer finishing (or an admin
+// broadcast) only UNLOCKS the next/explanation/fixed-code slides — it never forces
+// navigation to them. Whoever's looking at the screen always advances with a
+// deliberate click; nothing yanks the view out from under a mid-sentence presenter.
+const CODE_PANEL_VULNERABLE = 0;
+const CODE_PANEL_EXPLANATION = 1;
+const CODE_PANEL_FIXED = 2;
+const CODE_PANEL_COUNT = 3;
+
+type RevealData = { vulnerableLines: number[]; explanations: Record<number, string>; fixedCode: string };
+
+function useFixReveal(
+  selectedChallenge: PlayerChallenge | null,
+  timer: { startTime: number; duration: number; isRunning: boolean; isPaused: boolean } | null
+) {
+  const [panelIndex, setPanelIndex] = useState(0);
+  // Whether the explanation/fixed-code slides are allowed to be viewed yet —
+  // becomes true once the lab timer genuinely runs out, or the admin broadcasts a
+  // reveal. The next arrow stays disabled until this flips; nobody can click ahead
+  // and peek early.
+  const [revealEligible, setRevealEligible] = useState(false);
+  const [revealData, setRevealData] = useState<RevealData | null>(null);
+  const [revealLoading, setRevealLoading] = useState(false);
+  const socketRef = useRef<Socket | null>(null);
+
+  // Listen for admin-broadcast reveal/hide for this challenge
+  useEffect(() => {
+    if (!selectedChallenge) return;
+    if (!socketRef.current) {
+      socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
+    }
+    const socket = socketRef.current;
+    const onReveal = (data: { challengeId: string }) => {
+      if (data.challengeId === selectedChallenge.id) setRevealEligible(true);
+    };
+    const onHide = (data: { challengeId: string }) => {
+      if (data.challengeId === selectedChallenge.id) {
+        setRevealEligible(false);
+        setPanelIndex(CODE_PANEL_VULNERABLE);
+      }
+    };
+    socket.on('fix:reveal', onReveal);
+    socket.on('fix:hide', onHide);
+    return () => {
+      socket.off('fix:reveal', onReveal);
+      socket.off('fix:hide', onHide);
+    };
+  }, [selectedChallenge]);
+
+  // Unlock the explanation/fixed-code slides the moment a running timer actually
+  // hits zero. Deliberately NOT derived from the separately-ticking `timeLeft`
+  // display value — that's only updated every 250ms by its own setInterval, so
+  // right when a fresh timer starts it's still stale from before (often still 0),
+  // which would unlock this immediately on start rather than at real expiry.
+  // Scheduling a real setTimeout off the timer's own startTime+duration has no
+  // such race.
+  useEffect(() => {
+    if (!timer || !timer.isRunning || timer.isPaused) return;
+    const msRemaining = timer.startTime + timer.duration - Date.now();
+    if (msRemaining <= 0) {
+      setRevealEligible(true);
+      return;
+    }
+    const t = setTimeout(() => setRevealEligible(true), msRemaining);
+    return () => clearTimeout(t);
+  }, [timer?.startTime, timer?.duration, timer?.isRunning, timer?.isPaused]);
+
+  // Reset when switching to a different challenge
+  useEffect(() => {
+    setPanelIndex(CODE_PANEL_VULNERABLE);
+    setRevealEligible(false);
+    setRevealData(null);
+  }, [selectedChallenge?.id]);
+
+  // Lazily fetch the explanation + fixed code only once it's actually unlocked
+  useEffect(() => {
+    if (!revealEligible || !selectedChallenge || revealData !== null || revealLoading) return;
+    setRevealLoading(true);
+    fetch(`/api/challenges/${selectedChallenge.id}/reveal`)
+      .then((res) => res.json())
+      .then((data) =>
+        setRevealData({
+          vulnerableLines: Array.isArray(data.vulnerableLines) ? data.vulnerableLines : [],
+          explanations: data.explanations && typeof data.explanations === 'object' ? data.explanations : {},
+          fixedCode: typeof data.fixedCode === 'string' ? data.fixedCode : '',
+        })
+      )
+      .catch(() => setRevealData({ vulnerableLines: [], explanations: {}, fixedCode: '' }))
+      .finally(() => setRevealLoading(false));
+  }, [revealEligible, selectedChallenge, revealData, revealLoading]);
+
+  const canGoPrev = panelIndex > 0;
+  const canGoNext = revealEligible && panelIndex < CODE_PANEL_COUNT - 1;
+  const goPrev = () => setPanelIndex((i) => Math.max(0, i - 1));
+  const goNext = () => {
+    if (!revealEligible) return;
+    setPanelIndex((i) => Math.min(CODE_PANEL_COUNT - 1, i + 1));
+  };
+
+  return { panelIndex, revealData, revealLoading, canGoPrev, canGoNext, goPrev, goNext };
 }
 
 // Add a hook to get all running/paused timers for the challenge list
@@ -644,6 +809,8 @@ export default function CodeReviewChallenge() {
 
   // Move this hook call here so it's always called, before any early returns
   const { timers: allTimers, timeLefts: allTimeLefts } = useAllChallengeTimers();
+  const { timer: challengeTimer, timeLeft: challengeTimeLeft } = useChallengeTimer(selectedChallenge);
+  const { panelIndex: codePanelIndex, revealData, revealLoading, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
 
   // On mount: ask the server who this browser's session cookie says we are
   // (if anyone), and fetch locks/challenges. There is no client-side identity
@@ -1013,41 +1180,143 @@ export default function CodeReviewChallenge() {
                   <CardContent>
                     <div className="flex items-center gap-4 mb-4">
                       {/* Timer display for all users and admin */}
-                      <ChallengeTimer selectedChallenge={selectedChallenge} />
+                      <ChallengeTimer timeLeft={challengeTimeLeft} />
+                      {codePanelIndex === CODE_PANEL_EXPLANATION && (
+                        <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
+                          <AlertTriangle className="h-3.5 w-3.5" /> Exact Vulnerability
+                        </span>
+                      )}
+                      {codePanelIndex === CODE_PANEL_FIXED && (
+                        <span className="flex items-center gap-1 rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700">
+                          <CheckCircle className="h-3.5 w-3.5" /> Fixed / Secure Code
+                        </span>
+                      )}
                     </div>
-                    <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto">
-                      <SyntaxHighlighter
-                        language="javascript"
-                        style={oneDark}
-                        customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
-                        showLineNumbers
-                        wrapLines
-                        lineProps={(lineNumber: number) => {
-                          const status = getLineStatus(lineNumber);
-                          const isSelected = selectedLines.includes(lineNumber);
-                          let className = "flex items-center cursor-pointer transition-colors ";
-                          if (isSelected && !submitted) className += "bg-blue-900/50 hover:bg-blue-900/70 ";
-                          if (submitted && status === "correct") className += "bg-green-900/50 ";
-                          if (submitted && status === "incorrect") className += "bg-red-900/50 ";
-                          return {
-                            className,
-                            onClick: () => toggleLine(lineNumber),
-                            style: { cursor: 'pointer' },
-                          };
-                        }}
-                        lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
-                      >
-                        {selectedChallenge.code}
-                      </SyntaxHighlighter>
-                      {/* Show Hints button left-aligned with code block */}
-                      {!submitted && selectedChallenge.hints && (
-                        <div className="mt-2">
-                          <Button variant="outline" size="sm" onClick={() => setShowHints(!showHints)}>
-                            <Lightbulb className="h-4 w-4 mr-2" />
-                            {showHints ? "Hide Hints" : "Show Hints"}
-                          </Button>
+                    <div className="relative overflow-hidden rounded-lg group">
+                      {/* Carousel nav arrows */}
+                      {canGoPrevPanel && (
+                        <button
+                          type="button"
+                          onClick={goPrevPanel}
+                          aria-label="Previous"
+                          className="absolute left-2 top-1/2 -translate-y-1/2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white opacity-70 hover:opacity-100 transition-opacity"
+                        >
+                          <ChevronLeft className="h-5 w-5" />
+                        </button>
+                      )}
+                      {canGoNextPanel && (
+                        <button
+                          type="button"
+                          onClick={goNextPanel}
+                          aria-label="Next"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white opacity-70 hover:opacity-100 transition-opacity"
+                        >
+                          <ChevronRight className="h-5 w-5" />
+                        </button>
+                      )}
+                      {/* Slide position dots */}
+                      {CODE_PANEL_COUNT > 1 && (
+                        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex gap-1.5">
+                          {Array.from({ length: CODE_PANEL_COUNT }).map((_, i) => (
+                            <span
+                              key={i}
+                              className={`h-1.5 w-1.5 rounded-full transition-colors ${i === codePanelIndex ? 'bg-white' : 'bg-white/40'}`}
+                            />
+                          ))}
                         </div>
                       )}
+                      <div
+                        className="flex transition-transform duration-500 ease-in-out"
+                        style={{ width: `${CODE_PANEL_COUNT * 100}%`, transform: `translateX(-${codePanelIndex * (100 / CODE_PANEL_COUNT)}%)` }}
+                      >
+                        {/* Panel 1: vulnerable code — no label, this is the challenge itself */}
+                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%` }}>
+                          <SyntaxHighlighter
+                            language="javascript"
+                            style={oneDark}
+                            customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
+                            showLineNumbers
+                            wrapLines
+                            lineProps={(lineNumber: number) => {
+                              const status = getLineStatus(lineNumber);
+                              const isSelected = selectedLines.includes(lineNumber);
+                              let className = "flex items-center cursor-pointer transition-colors ";
+                              if (isSelected && !submitted) className += "bg-blue-900/50 hover:bg-blue-900/70 ";
+                              if (submitted && status === "correct") className += "bg-green-900/50 ";
+                              if (submitted && status === "incorrect") className += "bg-red-900/50 ";
+                              return {
+                                className,
+                                onClick: () => toggleLine(lineNumber),
+                                style: { cursor: 'pointer' },
+                              };
+                            }}
+                            lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
+                          >
+                            {selectedChallenge.code}
+                          </SyntaxHighlighter>
+                          {/* Show Hints button left-aligned with code block */}
+                          {!submitted && selectedChallenge.hints && (
+                            <div className="mt-2">
+                              <Button variant="outline" size="sm" onClick={() => setShowHints(!showHints)}>
+                                <Lightbulb className="h-4 w-4 mr-2" />
+                                {showHints ? "Hide Hints" : "Show Hints"}
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                        {/* Panel 2: exact vulnerability — the real vulnerable lines highlighted,
+                            read-only (no click-to-select, this isn't scored), with explanations
+                            so the walkthrough can happen right here instead of switching to slides */}
+                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%` }}>
+                          {revealLoading ? (
+                            <div className="py-8 text-center text-sm text-gray-400">Loading…</div>
+                          ) : (
+                            <>
+                              <SyntaxHighlighter
+                                language="javascript"
+                                style={oneDark}
+                                customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
+                                showLineNumbers
+                                wrapLines
+                                lineProps={(lineNumber: number) => ({
+                                  className: revealData?.vulnerableLines.includes(lineNumber) ? 'bg-red-900/50' : '',
+                                })}
+                                lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
+                              >
+                                {selectedChallenge.code}
+                              </SyntaxHighlighter>
+                              <div className="mt-3 space-y-2">
+                                {(revealData?.vulnerableLines ?? []).map((lineNumber) => (
+                                  <div key={lineNumber} className="rounded border-l-4 border-red-400 bg-red-950/40 p-2">
+                                    <p className="text-xs font-semibold text-red-300">Line {lineNumber}</p>
+                                    <p className="text-xs text-red-200">{revealData?.explanations[lineNumber]}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                        {/* Panel 3: fixed / secure code */}
+                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%` }}>
+                          {revealLoading ? (
+                            <div className="py-8 text-center text-sm text-gray-400">Loading…</div>
+                          ) : revealData?.fixedCode ? (
+                            <SyntaxHighlighter
+                              language="javascript"
+                              style={oneDark}
+                              customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
+                              showLineNumbers
+                              lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
+                            >
+                              {revealData.fixedCode}
+                            </SyntaxHighlighter>
+                          ) : (
+                            <div className="py-8 text-center text-sm text-gray-400">
+                              No fixed-code example has been added for this challenge yet — add one from the admin dashboard.
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
 
                     <div className="mt-4 flex items-center justify-between">

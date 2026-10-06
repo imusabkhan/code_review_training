@@ -14,6 +14,10 @@ const activeUsers = new Set();
 // Timer state per challenge
 const challengeTimers = {};
 
+// Fixed-code reveal state per challenge (manual admin override — the automatic
+// reveal-on-timer-expiry is computed independently per client from timer state)
+const challengeFixRevealed = {};
+
 // Helper to broadcast timer state
 function broadcastTimerUpdate(challengeId) {
   const timer = challengeTimers[challengeId];
@@ -99,12 +103,41 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Admin resets timer
+  // Admin resets timer — broadcast the cleared state directly rather than via
+  // broadcastTimerUpdate(), which only emits when a timer still exists in memory;
+  // by the time we'd call it here it's already deleted, so every OTHER connected
+  // client (not just the admin who clicked it) would otherwise never learn the
+  // timer was reset.
   socket.on('admin:resetTimer', ({ challengeId }) => {
-    if (challengeTimers[challengeId]) {
-      delete challengeTimers[challengeId];
-      broadcastTimerUpdate(challengeId);
-    }
+    delete challengeTimers[challengeId];
+    io.emit('timer:update', { challengeId, startTime: 0, duration: 0, isRunning: false, isPaused: false });
+  });
+
+  // Admin manually reveals/hides the fixed-code panel (e.g. for a challenge with
+  // no timer running, or to show it ahead of/again after the timer finishing)
+  socket.on('admin:revealFix', ({ challengeId }) => {
+    challengeFixRevealed[challengeId] = true;
+    io.emit('fix:reveal', { challengeId });
+  });
+  socket.on('admin:hideFix', ({ challengeId }) => {
+    delete challengeFixRevealed[challengeId];
+    io.emit('fix:hide', { challengeId });
+  });
+
+  // Admin does a full reset (paired with POST /api/admin-reset clearing the DB) —
+  // wipes every in-memory timer and fix-reveal, for every challenge, and tells
+  // every connected client so stale state from a demo/mock run never bleeds into
+  // the real session.
+  socket.on('admin:resetAll', () => {
+    const timerIds = Object.keys(challengeTimers);
+    const revealIds = Object.keys(challengeFixRevealed);
+    timerIds.forEach((id) => delete challengeTimers[id]);
+    revealIds.forEach((id) => delete challengeFixRevealed[id]);
+    const allIds = new Set([...timerIds, ...revealIds]);
+    allIds.forEach((challengeId) => {
+      io.emit('timer:update', { challengeId, startTime: 0, duration: 0, isRunning: false, isPaused: false });
+      io.emit('fix:hide', { challengeId });
+    });
   });
 
   // On user connect, send current timer state for all running timers
@@ -112,6 +145,10 @@ io.on('connection', (socket) => {
     if (timer.isRunning || timer.isPaused) {
       socket.emit('timer:update', { challengeId, ...timer });
     }
+  });
+  // ...and current fixed-code reveal state
+  Object.keys(challengeFixRevealed).forEach((challengeId) => {
+    socket.emit('fix:reveal', { challengeId });
   });
 });
 

@@ -55,4 +55,6 @@ model Challenge {
   flag               String?
   labUrl             String?
   maxSelectableLines Int?
+  fixedCode          String? // the patched/secure version, revealed once lab time is up
+  order              Int     @default(0) // defines the lab sequence; lower shows first
 }

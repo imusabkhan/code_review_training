@@ -14,6 +14,8 @@ type SeedChallenge = {
   flag?: string
   labUrl?: string
   maxSelectableLines?: number
+  fixedCode?: string
+  order?: number
 }
 
 const challenges: SeedChallenge[] = [
@@ -173,7 +175,10 @@ const challenges: SeedChallenge[] = [
 ]
 
 async function main() {
-  for (const challenge of challenges) {
+  for (const [index, challenge] of challenges.entries()) {
+    // Default sequence position is just array order — override per-entry via
+    // `order` above, or re-sequence afterward from the admin dashboard.
+    const order = challenge.order ?? index
     await prisma.challenge.upsert({
       where: { id: challenge.id },
       update: {
@@ -187,6 +192,8 @@ async function main() {
         flag: challenge.flag ?? null,
         labUrl: challenge.labUrl ?? null,
         maxSelectableLines: challenge.maxSelectableLines ?? null,
+        fixedCode: challenge.fixedCode ?? null,
+        order,
       },
       create: {
         id: challenge.id,
@@ -200,6 +207,8 @@ async function main() {
         flag: challenge.flag ?? null,
         labUrl: challenge.labUrl ?? null,
         maxSelectableLines: challenge.maxSelectableLines ?? null,
+        fixedCode: challenge.fixedCode ?? null,
+        order,
       },
     })
   }

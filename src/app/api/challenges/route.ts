@@ -4,10 +4,11 @@ import type { PlayerChallenge } from '@/types/challenge';
 
 // Public, unauthenticated. Never include vulnerableLines, explanations, or flag here —
 // those are the answer key and must only be revealed via a real submission
-// (see /api/submit-challenge and /api/submit-flag).
+// (see /api/submit-challenge and /api/submit-flag). fixedCode is withheld the same
+// way, for the same reason — see /api/challenges/[id]/reveal.
 export async function GET() {
   try {
-    const rows = await prisma.challenge.findMany();
+    const rows = await prisma.challenge.findMany({ orderBy: [{ order: 'asc' }, { id: 'asc' }] });
     const publicChallenges: PlayerChallenge[] = rows.map((row) => ({
       id: row.id,
       title: row.title,
@@ -17,6 +18,7 @@ export async function GET() {
       hints: row.hints ? JSON.parse(row.hints) : undefined,
       labUrl: row.labUrl ?? undefined,
       maxSelectableLines: row.maxSelectableLines ?? undefined,
+      order: row.order,
     }));
     return NextResponse.json(publicChallenges);
   } catch (error) {

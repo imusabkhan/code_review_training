@@ -20,6 +20,8 @@ function toChallenge(row: ChallengeRow): Challenge {
     flag: row.flag ?? undefined,
     labUrl: row.labUrl ?? undefined,
     maxSelectableLines: row.maxSelectableLines ?? undefined,
+    fixedCode: row.fixedCode ?? undefined,
+    order: row.order,
   };
 }
 
@@ -36,6 +38,8 @@ function toRow(challenge: Challenge) {
     flag: challenge.flag ?? null,
     labUrl: challenge.labUrl ?? null,
     maxSelectableLines: challenge.maxSelectableLines ?? null,
+    fixedCode: challenge.fixedCode ?? null,
+    order: challenge.order ?? 0,
   };
 }
 
@@ -45,7 +49,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
   try {
-    const rows = await prisma.challenge.findMany();
+    const rows = await prisma.challenge.findMany({ orderBy: [{ order: 'asc' }, { id: 'asc' }] });
     return NextResponse.json(rows.map(toChallenge));
   } catch (error) {
     console.error('Error fetching challenges:', error);
@@ -68,6 +72,12 @@ export async function POST(req: NextRequest) {
     const existing = await prisma.challenge.findUnique({ where: { id: challenge.id } });
     if (existing) {
       return NextResponse.json({ error: 'Challenge with this ID already exists' }, { status: 409 });
+    }
+
+    // Default new challenges to the end of the sequence unless an order was set explicitly
+    if (typeof challenge.order !== 'number') {
+      const last = await prisma.challenge.findFirst({ orderBy: { order: 'desc' } });
+      challenge.order = (last?.order ?? -1) + 1;
     }
 
     const row = await prisma.challenge.create({ data: toRow(challenge) });

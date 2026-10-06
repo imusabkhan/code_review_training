@@ -45,7 +45,9 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
         explanations: {} as Record<number, string>,
         labUrl: "",
         maxSelectableLines: 1,
-        flag: ""
+        flag: "",
+        fixedCode: "",
+        order: 0
     })
 
     const [hintInput, setHintInput] = useState("")
@@ -63,7 +65,9 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                 explanations: editingChallenge.explanations,
                 labUrl: editingChallenge.labUrl || "",
                 maxSelectableLines: editingChallenge.maxSelectableLines || 1,
-                flag: editingChallenge.flag || ""
+                flag: editingChallenge.flag || "",
+                fixedCode: editingChallenge.fixedCode || "",
+                order: editingChallenge.order ?? 0
             })
             setSelectedLines(editingChallenge.vulnerableLines)
         }
@@ -82,7 +86,9 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
             explanations: {},
             labUrl: "",
             maxSelectableLines: 1,
-            flag: ""
+            flag: "",
+            fixedCode: "",
+            order: challenges.length
         })
         setSelectedLines([])
     }
@@ -90,6 +96,17 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
     const handleEditChallenge = (challenge: Challenge) => {
         setIsNewChallenge(false)
         setEditingChallenge(challenge)
+    }
+
+    const [reordering, setReordering] = useState<string | null>(null)
+    const handleQuickReorder = async (challenge: Challenge, newOrder: number) => {
+        if (Number.isNaN(newOrder)) return
+        setReordering(challenge.id)
+        try {
+            await onSave({ ...challenge, order: newOrder })
+        } finally {
+            setReordering(null)
+        }
     }
 
     const handleCancel = () => {
@@ -122,7 +139,9 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                 explanations: formData.explanations,
                 labUrl: formData.labUrl || undefined,
                 maxSelectableLines: formData.maxSelectableLines,
-                flag: formData.flag || undefined
+                flag: formData.flag || undefined,
+                fixedCode: formData.fixedCode || undefined,
+                order: formData.order
             };
 
             console.log('Saving challenge:', challenge);
@@ -220,6 +239,9 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
     }
 
     const codeLines = formData.code.split("\n")
+    // Defensive client-side sort too — the API already orders by `order`, but
+    // this keeps the list correct even against a stale/cached fetch.
+    const sortedChallenges = [...challenges].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.id.localeCompare(b.id))
 
     return (
         <div className="space-y-6">
@@ -298,11 +320,16 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                            {challenges.map((challenge) => (
+                            {sortedChallenges.map((challenge) => (
                                 <Card key={challenge.id} className="hover:shadow-md transition-shadow">
                                     <CardHeader>
-                                        <CardTitle className="flex items-center justify-between">
-                                            <span className="truncate">{challenge.title}</span>
+                                        <CardTitle className="flex items-center justify-between gap-2">
+                                            <span className="flex items-center gap-2 truncate">
+                                                <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-mono text-gray-500" title="Position in the lab sequence">
+                                                    #{challenge.order ?? 0}
+                                                </span>
+                                                <span className="truncate">{challenge.title}</span>
+                                            </span>
                                             <Badge variant={challenge.difficulty === "beginner" ? "default" : challenge.difficulty === "intermediate" ? "secondary" : "destructive"}>
                                                 {challenge.difficulty}
                                             </Badge>
@@ -310,6 +337,20 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                                         <CardDescription className="line-clamp-2">{challenge.description}</CardDescription>
                                     </CardHeader>
                                     <CardContent>
+                                        <div className="mb-2 flex items-center gap-2 text-sm">
+                                            <label className="text-gray-600">Sequence #</label>
+                                            <input
+                                                type="number"
+                                                defaultValue={challenge.order ?? 0}
+                                                disabled={reordering === challenge.id}
+                                                onBlur={(e) => {
+                                                    const newOrder = parseInt(e.target.value, 10)
+                                                    if (newOrder !== (challenge.order ?? 0)) handleQuickReorder(challenge, newOrder)
+                                                }}
+                                                className="w-16 border rounded px-2 py-1 text-sm"
+                                            />
+                                            {reordering === challenge.id && <span className="text-xs text-gray-400">Saving…</span>}
+                                        </div>
                                         <div className="flex gap-2">
                                             <Button onClick={() => handleEditChallenge(challenge)} size="sm">
                                                 <Edit className="h-4 w-4 mr-1" />
@@ -412,7 +453,7 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                             />
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
                                 <label className="block text-sm font-medium mb-2">Lab URL</label>
                                 <Input
@@ -429,6 +470,15 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                                     value={formData.maxSelectableLines}
                                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData(prev => ({ ...prev, maxSelectableLines: parseInt(e.target.value) || 1 }))}
                                 />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Sequence Position</label>
+                                <Input
+                                    type="number"
+                                    value={formData.order}
+                                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData(prev => ({ ...prev, order: parseInt(e.target.value) || 0 }))}
+                                />
+                                <p className="mt-1 text-xs text-gray-500">Lower numbers appear first in the lab.</p>
                             </div>
                         </div>
 
@@ -490,6 +540,27 @@ export function ChallengeEditor({ challenges, onSave, onDelete, onRefresh }: Cha
                                     </div>
                                 </div>
                             )}
+                        </div>
+
+                        {/* Fixed / Secure Code */}
+                        <div>
+                            <label className="block text-sm font-medium mb-2">Fixed / Secure Code</label>
+                            <Textarea
+                                value={formData.fixedCode}
+                                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFormData(prev => ({ ...prev, fixedCode: e.target.value }))}
+                                placeholder="Paste the patched/secure version here (optional)..."
+                                rows={15}
+                                className="font-mono text-sm bg-gray-900 text-gray-100 border-gray-700 focus:border-blue-500 focus:ring-blue-500"
+                                style={{
+                                    fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace',
+                                    lineHeight: '1.5'
+                                }}
+                            />
+                            <div className="mt-2 text-sm text-gray-600">
+                                Shown to players in place of the vulnerable code once lab time runs out (or when
+                                manually revealed) — never sent to the browser before then. Leave blank to skip
+                                the reveal for this challenge.
+                            </div>
                         </div>
 
                         {/* Hints */}
