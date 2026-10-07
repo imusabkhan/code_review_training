@@ -11,12 +11,6 @@ import { io, Socket } from 'socket.io-client'
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4001';
 
-// Simple avatar generator: pick a random emoji
-const AVATARS = ["🦊", "🐻", "🐼", "🐸", "🐵", "🐶", "🐱", "🦁", "🐯", "🐨", "🐰", "🦄", "🐙", "🐧", "🐢", "🐦", "🐝", "🐬", "🦋", "🐞"];
-function getRandomAvatar() {
-  return AVATARS[Math.floor(Math.random() * AVATARS.length)];
-}
-
 
 function UserBar({ name, avatar, score }: { name: string; avatar: string; score: number }) {
   return (
@@ -28,82 +22,45 @@ function UserBar({ name, avatar, score }: { name: string; avatar: string; score:
   );
 }
 
-function NameModal({ open, onSubmit, submitting, claimError }: { open: boolean; onSubmit: (name: string) => void; submitting?: boolean; claimError?: string }) {
+function CodeModal({ open, onSubmit, submitting, claimError }: { open: boolean; onSubmit: (code: string) => void; submitting?: boolean; claimError?: string }) {
   const [input, setInput] = useState("");
-  const [checking, setChecking] = useState(false);
-  const [available, setAvailable] = useState<boolean | null>(null);
-  const [error, setError] = useState("");
-  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const [branding, setBranding] = useState<{ title: string | null; logoUrl: string | null } | null>(null);
 
   useEffect(() => {
-    setAvailable(null);
-    setError("");
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!input.trim()) {
-      setAvailable(null);
-      setError("");
-      return;
-    }
-    debounceRef.current = setTimeout(() => {
-      checkAvailability(input.trim());
-    }, 400);
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input]);
-
-  const checkAvailability = async (name: string) => {
-    setChecking(true);
-    setError("");
-    try {
-      const res = await fetch("/api/check-username", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: name })
-      });
-      if (!res.ok) {
-        // A server/DB error is NOT the same as "taken" — don't claim it is.
-        setError("Could not check username availability. Please try again.");
-        setAvailable(null);
-        return;
-      }
-      const data = await res.json();
-      setAvailable(data.available);
-      if (!data.available) setError("Username is already taken");
-    } catch {
-      setError("Could not check username availability");
-      setAvailable(null);
-    } finally {
-      setChecking(false);
-    }
-  };
+    fetch("/api/session-settings")
+      .then((res) => res.json())
+      .then((data) => setBranding({ title: data.title ?? null, logoUrl: data.logoUrl ?? null }))
+      .catch(() => setBranding({ title: null, logoUrl: null }));
+  }, []);
 
   const handleContinue = () => {
-    if (input.trim() && available && !submitting) onSubmit(input.trim());
+    if (input.trim() && !submitting) onSubmit(input.trim());
   };
 
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-lg shadow-lg p-8 w-full max-w-xs flex flex-col items-center gap-4">
-        <h2 className="text-xl font-bold mb-2">Welcome!</h2>
-        <p className="text-gray-600 text-sm mb-2">Enter your name to get started:</p>
+        {branding?.logoUrl && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={branding.logoUrl} alt="" className="h-14 max-w-full object-contain" />
+        )}
+        <h2 className="text-xl font-bold text-center">{branding?.title || "Welcome!"}</h2>
+        <p className="text-gray-600 text-sm mb-2">Enter your invite code to get started:</p>
         <input
-          className="border rounded px-3 py-2 w-full focus:outline-none focus:ring"
-          placeholder="Your name"
+          className="border rounded px-3 py-2 w-full text-center tracking-widest font-mono uppercase focus:outline-none focus:ring"
+          placeholder="CODE"
+          maxLength={12}
           value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={async e => {
-            if (e.key === 'Enter' && input.trim() && available && !submitting) {
+          onChange={e => setInput(e.target.value.toUpperCase())}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && input.trim() && !submitting) {
               onSubmit(input.trim());
             }
           }}
         />
-        {checking && <div className="text-xs text-gray-500">Checking availability...</div>}
-        {error && <div className="text-xs text-red-600">{error}</div>}
-        {claimError && <div className="text-xs text-red-600">{claimError}</div>}
-        <Button className="w-full mt-2" onClick={handleContinue} disabled={checking || available !== true || submitting}>
+        {claimError && <div className="text-xs text-red-600 text-center">{claimError}</div>}
+        <Button className="w-full mt-2" onClick={handleContinue} disabled={!input.trim() || submitting}>
           {submitting ? "Joining..." : "Continue"}
         </Button>
       </div>
@@ -151,11 +108,18 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
       setTimeLeft(0);
       return;
     }
-    const interval = setInterval(() => {
+    // Compute immediately, not just on the first interval tick — otherwise, the
+    // instant a reconnect (e.g. a page refresh mid-timer) delivers the real,
+    // already-running timer, timeLeft is still its stale initial 0 for up to
+    // 250ms. With isRunning true and timeLeft 0, that reads as "Time's Up" for
+    // a flash before correcting itself.
+    const tick = () => {
       const now = Date.now();
       const end = timer.startTime + timer.duration;
       setTimeLeft(Math.max(0, Math.floor((end - now) / 1000)));
-    }, 250);
+    };
+    tick();
+    const interval = setInterval(tick, 250);
     return () => clearInterval(interval);
   }, [timer]);
 
@@ -242,7 +206,10 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
 
   // Update ticking timers for admin
   useEffect(() => {
-    const interval = setInterval(() => {
+    // Compute immediately, not just on the first tick — otherwise a timer that
+    // arrives already running (e.g. on reconnect) briefly reads as 0 remaining,
+    // which displays as "Time's Up" until the first 250ms tick corrects it.
+    const recompute = () => {
       setTimeLefts(prev => {
         const updated: Record<string, number> = { ...prev };
         Object.entries(timers).forEach(([challengeId, timer]) => {
@@ -258,7 +225,9 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
         });
         return updated;
       });
-    }, 250);
+    };
+    recompute();
+    const interval = setInterval(recompute, 250);
     return () => clearInterval(interval);
   }, [timers]);
 
@@ -767,7 +736,11 @@ function useAllChallengeTimers() {
   }, []);
 
   useEffect(() => {
-    const interval = setInterval(() => {
+    // Same immediate-compute-then-interval pattern as useChallengeTimer — without
+    // it, a timer that arrives already running (e.g. synced to a client that just
+    // reconnected) shows 0 remaining for up to 250ms, which a running timer with
+    // no time left reads as "Time's Up" until the first tick corrects it.
+    const recompute = () => {
       setTimeLefts(prev => {
         const updated: Record<string, number> = { ...prev };
         Object.entries(timers).forEach(([challengeId, timer]) => {
@@ -783,7 +756,9 @@ function useAllChallengeTimers() {
         });
         return updated;
       });
-    }, 250);
+    };
+    recompute();
+    const interval = setInterval(recompute, 250);
     return () => clearInterval(interval);
   }, [timers]);
 
@@ -811,8 +786,8 @@ export default function CodeReviewChallenge() {
   // Bumped whenever OUR OWN score just changed, so the Leaderboard widget can
   // refetch immediately instead of waiting for its 5s ambient poll.
   const [leaderboardRefreshSignal, setLeaderboardRefreshSignal] = useState(0);
-  const [showNameModal, setShowNameModal] = useState(false);
-  const [claimingName, setClaimingName] = useState(false);
+  const [showCodeModal, setShowCodeModal] = useState(false);
+  const [claimingCode, setClaimingCode] = useState(false);
   const [claimError, setClaimError] = useState("");
 
   // Challenge lock state (persisted via API)
@@ -915,10 +890,10 @@ export default function CodeReviewChallenge() {
           setUser({ name: data.name, avatar: data.avatar || "", score: data.score || 0 });
           fetchAttemptsMap();
         } else {
-          setShowNameModal(true);
+          setShowCodeModal(true);
         }
       })
-      .catch(() => setShowNameModal(true));
+      .catch(() => setShowCodeModal(true));
 
     // Fetch locks from API
     fetch('/api/challenge-locks')
@@ -946,27 +921,27 @@ export default function CodeReviewChallenge() {
     fetchChallenges();
   }, [fetchAttemptsMap]); // fetchAttemptsMap is useCallback-stable — this still only runs once on mount
 
-  const handleNameSubmit = async (name: string) => {
-    setClaimingName(true);
+  const handleCodeSubmit = async (code: string) => {
+    setClaimingCode(true);
     setClaimError("");
-    const avatar = getRandomAvatar();
     try {
       const res = await fetch('/api/player-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, avatar }),
+        body: JSON.stringify({ code }),
       });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        setUser({ name, avatar, score: 0 });
-        setShowNameModal(false);
+        setUser({ name: data.name, avatar: data.avatar, score: data.score || 0 });
+        setShowCodeModal(false);
+        fetchAttemptsMap();
       } else {
-        const data = await res.json().catch(() => ({}));
-        setClaimError(data.error || 'Could not claim that name. Try another.');
+        setClaimError(data.error || 'Invalid code. Please check and try again.');
       }
     } catch {
       setClaimError('Could not reach the server. Try again.');
     } finally {
-      setClaimingName(false);
+      setClaimingCode(false);
     }
   };
 
@@ -1181,9 +1156,9 @@ export default function CodeReviewChallenge() {
     }
   }, [selectedChallenge, user.name]);
 
-  // Show name modal if needed
-  if (showNameModal) {
-    return <NameModal open={showNameModal} onSubmit={handleNameSubmit} submitting={claimingName} claimError={claimError} />
+  // Show invite-code modal if needed
+  if (showCodeModal) {
+    return <CodeModal open={showCodeModal} onSubmit={handleCodeSubmit} submitting={claimingCode} claimError={claimError} />
   }
 
   // Show challenge selection if no challenge is selected

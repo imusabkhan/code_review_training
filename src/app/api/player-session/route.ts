@@ -3,7 +3,12 @@ import { getIronSession } from 'iron-session';
 import { prisma } from '@/lib/prisma';
 import { playerSessionOptions } from '@/lib/playerSession';
 
-type PlayerSessionData = { name?: string };
+const AVATARS = ["🦊", "🐻", "🐼", "🐸", "🐵", "🐶", "🐱", "🦁", "🐯", "🐨", "🐰", "🦄", "🐙", "🐧", "🐢", "🐦", "🐝", "🐬", "🦋", "🐞"];
+function getRandomAvatar() {
+  return AVATARS[Math.floor(Math.random() * AVATARS.length)];
+}
+
+type PlayerSessionData = { name?: string; email?: string };
 
 // GET: who does this browser's session cookie say we are (if anyone), plus
 // their current score looked up directly (not from the top-10 leaderboard,
@@ -21,9 +26,12 @@ export async function GET(request: NextRequest) {
   });
 }
 
-// POST: claim a display name for this browser. This is the only place a
-// player's identity is ever established — every other endpoint trusts the
-// resulting session cookie, never a client-supplied `name` field.
+// POST: redeem an admin-issued invite code for this browser. This is the only
+// place a player's identity is ever established — every other endpoint trusts
+// the resulting session cookie, never a client-supplied name. The display name
+// is never typed by the player; it's derived server-side from the email the
+// code was issued to, so there's no free-text name to squat or pollute the
+// leaderboard with.
 export async function POST(request: NextRequest) {
   let body;
   try {
@@ -32,31 +40,42 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const name = typeof body.name === 'string' ? body.name.trim() : '';
-  const avatar = typeof body.avatar === 'string' ? body.avatar : '';
-  if (!name || name.length > 40) {
-    return NextResponse.json({ error: 'Invalid name' }, { status: 400 });
+  const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
+  if (!code) {
+    return NextResponse.json({ error: 'Enter your invite code' }, { status: 400 });
   }
 
-  const res = NextResponse.json({ success: true });
-  const session = await getIronSession<PlayerSessionData>(request, res, playerSessionOptions);
-
-  if (session.name === name) {
-    // Re-affirming the same identity (e.g. page reload) — nothing to change.
-    return res;
+  const invited = await prisma.invitedPlayer.findUnique({ where: { code } });
+  if (!invited) {
+    return NextResponse.json({ error: 'Invalid code. Please check and try again.' }, { status: 401 });
   }
 
-  try {
-    await prisma.leaderboardUser.create({ data: { name, avatar, score: 0 } });
-  } catch (error: any) {
-    if (error?.code === 'P2002') {
-      return NextResponse.json({ error: 'Username is already taken' }, { status: 409 });
+  // Redeeming the same code again (new device, cleared cookies, page refresh
+  // before the GET sync ran) resumes the same identity and score rather than
+  // erroring — the name is deterministic per email, so this is always safe.
+  const existingUser = await prisma.leaderboardUser.findUnique({ where: { name: invited.name } });
+  let avatar = existingUser?.avatar ?? getRandomAvatar();
+  let score = existingUser?.score ?? 0;
+  if (!existingUser) {
+    try {
+      await prisma.leaderboardUser.create({ data: { name: invited.name, avatar, score: 0, email: invited.email } });
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        // Lost a race with a concurrent redemption of the same code — the row
+        // now exists, just use what it actually ended up with.
+        const row = await prisma.leaderboardUser.findUnique({ where: { name: invited.name } });
+        avatar = row?.avatar ?? avatar;
+        score = row?.score ?? score;
+      } else {
+        throw error;
+      }
     }
-    console.error('Error claiming player name:', error);
-    return NextResponse.json({ error: 'Server error' }, { status: 500 });
   }
 
-  session.name = name;
+  const res = NextResponse.json({ success: true, name: invited.name, avatar, score });
+  const session = await getIronSession<PlayerSessionData>(request, res, playerSessionOptions);
+  session.name = invited.name;
+  session.email = invited.email;
   await session.save();
   return res;
 }

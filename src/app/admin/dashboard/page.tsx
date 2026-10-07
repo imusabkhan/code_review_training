@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { AdminPanel } from "@/components/code-review-challenge"
 import { ChallengeEditor } from "@/components/admin/challenge-editor"
+import { PlayerAccessPanel } from "@/components/admin/player-access-panel"
 import { UserCount } from "@/components/ui/user-count"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -212,7 +213,7 @@ export default function AdminDashboard() {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="challenges" className="flex items-center gap-2">
               <Code className="h-4 w-4" />
               Challenges
@@ -220,6 +221,10 @@ export default function AdminDashboard() {
             <TabsTrigger value="locks" className="flex items-center gap-2">
               <Lock className="h-4 w-4" />
               Challenge Locks
+            </TabsTrigger>
+            <TabsTrigger value="players" className="flex items-center gap-2">
+              <Users className="h-4 w-4" />
+              Players
             </TabsTrigger>
             <TabsTrigger value="analytics" className="flex items-center gap-2">
               <BarChart3 className="h-4 w-4" />
@@ -251,6 +256,10 @@ export default function AdminDashboard() {
                 <AdminPanel locks={locks} onToggleLock={handleToggleLock} challenges={challenges} />
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="players" className="space-y-6">
+            <PlayerAccessPanel />
           </TabsContent>
 
           <TabsContent value="analytics" className="space-y-6">

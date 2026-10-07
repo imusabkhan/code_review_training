@@ -33,10 +33,36 @@ model ChallengeTimer {
 }
 
 model LeaderboardUser {
-  id        String @id @default(uuid())
-  name      String @unique
+  id        String  @id @default(uuid())
+  name      String  @unique
   avatar    String
   score     Int
+  // The verified email this identity was redeemed from (see InvitedPlayer) —
+  // null for any pre-existing row created before the invite-code system, and
+  // purely informational for admins; nothing security-relevant reads it.
+  email     String?
+}
+
+// Admin-managed whitelist of who may join this session, replacing free-text
+// name entry (which let anyone claim any name and pollute the leaderboard).
+// The player's display name is deterministically derived from their email
+// (see deriveNameFromEmail) so it can never be spoofed independently of it,
+// and `code` is the secret the admin hands out — knowing someone's email
+// alone isn't enough to sign in as them.
+model InvitedPlayer {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  code      String   @unique
+  createdAt DateTime @default(now())
+}
+
+// Singleton row (id is always "default") holding the session's branding,
+// editable from the admin dashboard and read by the public welcome screen.
+model SessionSettings {
+  id      String  @id @default("default")
+  title   String?
+  logoUrl String?
 }
 
 model ChallengeSubmission {

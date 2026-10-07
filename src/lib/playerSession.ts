@@ -18,6 +18,7 @@ export const playerSessionOptions: SessionOptions = {
 
 type PlayerSessionData = {
   name?: string;
+  email?: string;
 };
 
 // The player's display name as bound to THIS browser by a real signed cookie —
