@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { ImageIcon, Save, UserPlus, Copy, Trash2, Check } from "lucide-react"
+import { ImageIcon, Save, UserPlus, Copy, Trash2, Check, Download } from "lucide-react"
 
 type InvitedPlayer = {
   id: string
@@ -108,6 +108,28 @@ export function PlayerAccessPanel() {
     }
   }
 
+  // CSV opens natively in Excel — no extra dependency needed to hand this to HR.
+  const handleExport = () => {
+    const escape = (value: string) => `"${value.replace(/"/g, '""')}"`
+    const header = ["Email", "Name", "Code", "Created At"]
+    const rows = players.map((p) => [
+      p.email,
+      p.name,
+      p.code,
+      new Date(p.createdAt).toLocaleString(),
+    ])
+    const csv = [header, ...rows].map((row) => row.map(escape).join(",")).join("\r\n")
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `invite-codes-${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="space-y-6">
       <Card>
@@ -148,14 +170,22 @@ export function PlayerAccessPanel() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <UserPlus className="h-5 w-5" />
-            Invite Codes
-          </CardTitle>
-          <CardDescription>
-            Paste one email per line. Each gets a unique code — share it with that person so
-            they can sign in. Their display name is derived automatically from their email.
-          </CardDescription>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <UserPlus className="h-5 w-5" />
+                Invite Codes
+              </CardTitle>
+              <CardDescription className="mt-1.5">
+                Paste one email per line. Each gets a unique code — share it with that person so
+                they can sign in. Their display name is derived automatically from their email.
+              </CardDescription>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleExport} disabled={players.length === 0}>
+              <Download className="h-4 w-4 mr-2" />
+              Export CSV
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-3">
           <Textarea
