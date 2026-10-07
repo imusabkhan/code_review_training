@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, Lightbulb, Lock, Unlock, ChevronLeft, ChevronRight } from "lucide-react"
 import type { PlayerChallenge, ChallengeSummary } from "@/types/challenge"
+import { MAX_CHALLENGE_ATTEMPTS } from "@/lib/constants"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { io, Socket } from 'socket.io-client'
@@ -207,6 +208,14 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
           ...(typeof data.remaining === 'number' ? { remaining: data.remaining } : {})
         }
       }));
+      // Mirror into the DB so submit-challenge/submit-flag (a separate process
+      // from this socket server) can enforce "timer's expired" server-side —
+      // see ChallengeTimer in schema.prisma.
+      fetch('/api/admin/challenge-timer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }).catch(() => {});
     };
     socket.on('timer:update', handleTimerUpdate);
     const handleFixReveal = (data: { challengeId: string }) => {
@@ -623,6 +632,11 @@ function useFixReveal(
   // reveal. The next arrow stays disabled until this flips; nobody can click ahead
   // and peek early.
   const [revealEligible, setRevealEligible] = useState(false);
+  // Specifically "the timer genuinely ran out" — unlike revealEligible, this is
+  // NEVER set by an admin's manual Reveal Fix broadcast (which can legitimately
+  // happen on an untimed challenge). Used to block answer/flag submission; must
+  // track the real deadline only, not "is the fix currently visible."
+  const [timerExpired, setTimerExpired] = useState(false);
   const [revealData, setRevealData] = useState<RevealData | null>(null);
   const [revealLoading, setRevealLoading] = useState(false);
   const socketRef = useRef<Socket | null>(null);
@@ -659,13 +673,23 @@ function useFixReveal(
   // Scheduling a real setTimeout off the timer's own startTime+duration has no
   // such race.
   useEffect(() => {
-    if (!timer || !timer.isRunning || timer.isPaused) return;
+    if (!timer || !timer.isRunning || timer.isPaused) {
+      // No active deadline right now (never started, paused, or just reset) —
+      // explicitly clear any prior expiry rather than leaving it stale.
+      setTimerExpired(false);
+      return;
+    }
     const msRemaining = timer.startTime + timer.duration - Date.now();
     if (msRemaining <= 0) {
+      setTimerExpired(true);
       setRevealEligible(true);
       return;
     }
-    const t = setTimeout(() => setRevealEligible(true), msRemaining);
+    setTimerExpired(false); // freshly (re)started — not expired yet
+    const t = setTimeout(() => {
+      setTimerExpired(true);
+      setRevealEligible(true);
+    }, msRemaining);
     return () => clearTimeout(t);
   }, [timer?.startTime, timer?.duration, timer?.isRunning, timer?.isPaused]);
 
@@ -673,6 +697,7 @@ function useFixReveal(
   useEffect(() => {
     setPanelIndex(CODE_PANEL_VULNERABLE);
     setRevealEligible(false);
+    setTimerExpired(false);
     setRevealData(null);
   }, [selectedChallenge?.id]);
 
@@ -701,7 +726,7 @@ function useFixReveal(
     setPanelIndex((i) => Math.min(CODE_PANEL_COUNT - 1, i + 1));
   };
 
-  return { panelIndex, revealData, revealLoading, canGoPrev, canGoNext, goPrev, goNext };
+  return { panelIndex, revealData, revealLoading, timerExpired, canGoPrev, canGoNext, goPrev, goNext };
 }
 
 // Add a hook to get all running/paused timers for the challenge list
@@ -804,19 +829,22 @@ export default function CodeReviewChallenge() {
   // (before the server even responds) so submitting never feels like it did nothing, then
   // flips to the actual result. Lives in that row specifically so it never shifts layout;
   // stays visible until the next attempt/challenge/reset instead of auto-dismissing.
-  const [submitToast, setSubmitToast] = useState<{ status: 'checking' | 'correct' | 'incorrect' } | null>(null);
+  const [submitToast, setSubmitToast] = useState<{ status: 'checking' | 'correct' | 'incorrect' | 'blocked'; message?: string } | null>(null);
   // Per-line correct/incorrect feedback for the lines the user selected (server-authoritative)
   const [submissionFeedback, setSubmissionFeedback] = useState<{ line: number; status: string }[]>([]);
   // The answer key, only populated once the server reveals it after a correct submission
   const [revealedVulnerableLines, setRevealedVulnerableLines] = useState<number[]>([]);
   const [revealedExplanations, setRevealedExplanations] = useState<Record<number, string>>({});
 
-  // Attempts state — null means "not loaded yet for this challenge", deliberately
-  // NOT defaulted to the max (4). Showing a hardcoded 4 while the real count loads
-  // is exactly what caused the "flashes 4, then resets" glitch: whatever stale/
-  // wrong number was on screen gets visibly corrected a moment later.
+  // Attempts for the CURRENTLY SELECTED challenge (what's actually displayed).
   const [attemptsUsed, setAttemptsUsed] = useState<number | null>(null);
   const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
+  // Prefetched attempts for every challenge this player has touched, fetched once
+  // up front — lets handleSelectChallenge seed the two values above INSTANTLY and
+  // correctly (no loading flash, no wrong-default flash) instead of waiting on a
+  // per-challenge network round trip. A challenge with no entry here simply has 0
+  // attempts used, which is already known without a query.
+  const [attemptsMap, setAttemptsMap] = useState<Record<string, { attemptsUsed: number; attemptsRemaining: number }>>({});
 
   // Open Lab state
   const [openLabChallenge, setOpenLabChallenge] = useState<string | null>(null);
@@ -830,7 +858,14 @@ export default function CodeReviewChallenge() {
   // Move this hook call here so it's always called, before any early returns
   const { timers: allTimers, timeLefts: allTimeLefts } = useAllChallengeTimers();
   const { timer: challengeTimer, timeLeft: challengeTimeLeft } = useChallengeTimer(selectedChallenge);
-  const { panelIndex: codePanelIndex, revealData, revealLoading, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
+  const { panelIndex: codePanelIndex, revealData, revealLoading, timerExpired, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
+
+  const fetchAttemptsMap = useCallback(() => {
+    fetch('/api/player-attempts')
+      .then(res => res.json())
+      .then(data => setAttemptsMap(data && typeof data === 'object' ? data : {}))
+      .catch(() => {});
+  }, []);
 
   // On mount: ask the server who this browser's session cookie says we are
   // (if anyone), and fetch locks/challenges. There is no client-side identity
@@ -841,6 +876,7 @@ export default function CodeReviewChallenge() {
       .then(data => {
         if (data.name) {
           setUser({ name: data.name, avatar: data.avatar || "", score: data.score || 0 });
+          fetchAttemptsMap();
         } else {
           setShowNameModal(true);
         }
@@ -871,7 +907,7 @@ export default function CodeReviewChallenge() {
     };
 
     fetchChallenges();
-  }, []); // Empty dependency array - only run once on mount
+  }, [fetchAttemptsMap]); // fetchAttemptsMap is useCallback-stable — this still only runs once on mount
 
   const handleNameSubmit = async (name: string) => {
     setClaimingName(true);
@@ -914,10 +950,12 @@ export default function CodeReviewChallenge() {
     setSubmissionFeedback([]);
     setRevealedVulnerableLines([]);
     setRevealedExplanations({});
-    // Reset to "unknown" immediately — don't let the previous challenge's attempt
-    // count (or an old default) linger on screen while this one's real count loads.
-    setAttemptsUsed(null);
-    setAttemptsRemaining(null);
+    // Seed instantly and correctly from the prefetched map — no network round trip,
+    // no loading flash, no wrong-default flash. A challenge with no entry genuinely
+    // has 0 attempts used, which doesn't need a fetch to know.
+    const cached = attemptsMap[challenge.id];
+    setAttemptsUsed(cached?.attemptsUsed ?? 0);
+    setAttemptsRemaining(cached?.attemptsRemaining ?? MAX_CHALLENGE_ATTEMPTS);
   }
 
   // Check if user has already solved the selected challenge (challenge submission)
@@ -961,7 +999,11 @@ export default function CodeReviewChallenge() {
     checkFlagAlreadySolved();
   }, [selectedChallenge, user.name]);
 
-  // Fetch attempts when challenge or user changes
+  // Quiet background re-check — handleSelectChallenge already seeded the correct
+  // numbers instantly from the prefetched cache, so this just silently corrects
+  // them in the rare case the cache was stale (e.g. the same player active in
+  // another tab). No loading state here on purpose: it should never visibly
+  // change what's already shown unless the cached value was actually wrong.
   useEffect(() => {
     const fetchAttempts = async () => {
       if (selectedChallenge && user.name) {
@@ -973,9 +1015,10 @@ export default function CodeReviewChallenge() {
         const data = await res.json();
         setAttemptsUsed(data.attemptsUsed);
         setAttemptsRemaining(data.attemptsRemaining);
+        setAttemptsMap(prev => ({ ...prev, [selectedChallenge.id]: { attemptsUsed: data.attemptsUsed, attemptsRemaining: data.attemptsRemaining } }));
       } else {
         setAttemptsUsed(0);
-        setAttemptsRemaining(4);
+        setAttemptsRemaining(MAX_CHALLENGE_ATTEMPTS);
       }
     };
     fetchAttempts();
@@ -1012,14 +1055,24 @@ export default function CodeReviewChallenge() {
           setLeaderboardRefreshSignal(s => s + 1);
         }
         setSubmitToast({ status: data.correct ? 'correct' : 'incorrect' });
+      } else if (res.status === 423) {
+        // Locked or time's-up — not a wrong answer, don't label it like one
+        // (and don't count it as a "Try Again"-able incorrect attempt either).
+        setSubmitted(false);
+        setShowResults(false);
+        setSubmitToast({ status: 'blocked', message: typeof data.error === 'string' ? data.error : 'Submissions are closed for this challenge.' });
       } else {
         setLastSubmissionCorrect(false);
         setSubmissionFeedback([]);
         setSubmitToast({ status: 'incorrect' });
       }
-      // Update attempts from backend response
+      // Update attempts from backend response, and keep the prefetch cache in sync
+      // so it's still correct if the player leaves and reopens this challenge later.
       if (typeof data.attemptsUsed === 'number') setAttemptsUsed(data.attemptsUsed);
       if (typeof data.attemptsRemaining === 'number') setAttemptsRemaining(data.attemptsRemaining);
+      if (typeof data.attemptsUsed === 'number' && typeof data.attemptsRemaining === 'number') {
+        setAttemptsMap(prev => ({ ...prev, [selectedChallenge.id]: { attemptsUsed: data.attemptsUsed, attemptsRemaining: data.attemptsRemaining } }));
+      }
     }
   }
 
@@ -1359,6 +1412,12 @@ export default function CodeReviewChallenge() {
                       {/* Result indicator lives right next to the Submit/Try Again button —
                           same row, so it's immediately in view without shifting anything. */}
                       <div className="flex items-center gap-2">
+                        {!submitToast && timerExpired && !alreadySolved && (
+                          <span className="flex items-center gap-2 rounded-full border-2 border-gray-300 bg-gray-100 px-3 py-1.5 text-sm font-bold text-gray-600">
+                            <XCircle className="h-4 w-4 shrink-0" />
+                            Time's up — submissions closed
+                          </span>
+                        )}
                         {submitToast?.status === 'checking' && (
                           <span className="flex items-center gap-2 text-sm font-semibold text-gray-600 animate-fade-in">
                             <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
@@ -1375,6 +1434,12 @@ export default function CodeReviewChallenge() {
                           <span className="flex items-center gap-2 rounded-full border-2 border-green-400 bg-green-100 px-3 py-1.5 text-sm font-bold text-green-700 animate-fade-in">
                             <CheckCircle className="h-4 w-4 shrink-0" />
                             Correct!
+                          </span>
+                        )}
+                        {submitToast?.status === 'blocked' && (
+                          <span className="flex items-center gap-2 rounded-full border-2 border-gray-300 bg-gray-100 px-3 py-1.5 text-sm font-bold text-gray-600 animate-fade-in">
+                            <XCircle className="h-4 w-4 shrink-0" />
+                            {submitToast.message}
                           </span>
                         )}
                       </div>
@@ -1403,7 +1468,7 @@ export default function CodeReviewChallenge() {
                                 </a>
                               );
                             })()}
-                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || attemptsRemaining === null || isLocked}>
+                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || attemptsRemaining === null || isLocked || timerExpired}>
                               Submit Answer
                             </Button>
                           </div>
@@ -1418,11 +1483,16 @@ export default function CodeReviewChallenge() {
                     {/* --- Flag submission for challenge view --- */}
                     <div className="mt-5">
                       {/* Only show flag submission form if flag is not already solved */}
+                      {!flagAlreadySolved && timerExpired && (
+                        <div className="mb-2 text-sm font-semibold text-gray-600">
+                          Time's up for this challenge — flag submissions are closed.
+                        </div>
+                      )}
                       {!flagAlreadySolved && (
                         <form
                           onSubmit={async (e) => {
                             e.preventDefault();
-                            if (!flagInput.trim() || flagAlreadySolved || isLocked) return;
+                            if (!flagInput.trim() || flagAlreadySolved || isLocked || timerExpired) return;
                             setFlagChallengeLoading(true);
                             setFlagChallengeStatus({ status: 'loading' });
                             try {
@@ -1433,7 +1503,7 @@ export default function CodeReviewChallenge() {
                               });
                               const data = await res.json();
                               if (res.status === 423) {
-                                setFlagChallengeStatus({ status: 'error', message: 'This challenge is currently locked by the admin. You cannot submit flags.' });
+                                setFlagChallengeStatus({ status: 'error', message: typeof data.error === 'string' ? data.error : 'Flag submissions are closed for this challenge.' });
                               } else if (data.success && data.correct) {
                                 setFlagChallengeStatus({ status: 'success', message: data.alreadySolved ? 'Already solved!' : 'Correct flag! +5 points' });
                                 setUser(u => ({ ...u, score: data.score }));
@@ -1459,13 +1529,13 @@ export default function CodeReviewChallenge() {
                             placeholder="Flag here"
                             value={flagInput}
                             onChange={e => setFlagInput(e.target.value)}
-                            disabled={flagChallengeLoading || flagAlreadySolved || isLocked}
+                            disabled={flagChallengeLoading || flagAlreadySolved || isLocked || timerExpired}
                           />
                           <Button
                             type="submit"
                             className="ml-2 h-full bg-green-100 text-green-700 hover:bg-green-200 border-green-200"
                             variant="outline"
-                            disabled={flagChallengeLoading || !flagInput.trim() || flagAlreadySolved || isLocked}
+                            disabled={flagChallengeLoading || !flagInput.trim() || flagAlreadySolved || isLocked || timerExpired}
                           >
                             {flagChallengeLoading ? 'Submitting...' : 'Submit Flag'}
                           </Button>

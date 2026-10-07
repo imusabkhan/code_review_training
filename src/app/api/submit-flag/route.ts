@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getPlayerName } from '@/lib/playerSession';
+import { isChallengeTimerExpired } from '@/lib/challengeTimerExpired';
 
 export async function POST(req: NextRequest) {
   try {
@@ -44,6 +45,12 @@ export async function POST(req: NextRequest) {
     const lock = await prisma.challengeLock.findUnique({ where: { id: challengeId } });
     if (lock && lock.locked) {
       return NextResponse.json({ success: false, error: 'Challenge is locked' }, { status: 423 });
+    }
+    // Enforced server-side, not just a disabled button — the leaderboard is shared,
+    // so a submission after time's up would be an unfair advantage over everyone
+    // who worked within the window.
+    if (await isChallengeTimerExpired(challengeId)) {
+      return NextResponse.json({ success: false, error: "Time's up for this challenge — submissions are closed." }, { status: 423 });
     }
 
     // Check if user already solved this flag

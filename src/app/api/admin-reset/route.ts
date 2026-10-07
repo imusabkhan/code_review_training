@@ -11,6 +11,9 @@ export async function POST(request: NextRequest) {
     await prisma.flagSubmission.deleteMany();
     await prisma.leaderboardUser.deleteMany();
     await prisma.challengeLock.deleteMany();
+    // Without this, a stale "expired" timer row from a demo/mock run would keep
+    // blocking real submissions after the reset, even with everything else fresh.
+    await prisma.challengeTimer.deleteMany();
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to reset database' }, { status: 500 });

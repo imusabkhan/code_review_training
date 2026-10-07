@@ -18,6 +18,20 @@ model ChallengeLock {
   locked    Boolean
 }
 
+// Durable mirror of the socket server's in-memory timer state, written by the
+// admin dashboard whenever a timer starts/pauses/resumes/resets. The socket
+// server stays in-memory-only (fast, for the live countdown broadcast) — this
+// table exists purely so submit-challenge/submit-flag (plain REST routes, a
+// separate process from the socket server) can authoritatively check "has this
+// challenge's timer actually expired" before accepting a submission.
+model ChallengeTimer {
+  id        String   @id // challengeId
+  startTime DateTime
+  duration  Int      // ms
+  isRunning Boolean  @default(false)
+  isPaused  Boolean  @default(false)
+}
+
 model LeaderboardUser {
   id        String @id @default(uuid())
   name      String @unique

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getPlayerName } from '@/lib/playerSession';
 import { MAX_CHALLENGE_ATTEMPTS } from '@/lib/constants';
+import { isChallengeTimerExpired } from '@/lib/challengeTimerExpired';
 
 export async function POST(req: NextRequest) {
   const { avatar, challengeId, selectedLines } = await req.json();
@@ -21,18 +22,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Not signed in' }, { status: 401 });
   }
 
-  // Challenge + lock are independent reads — fetch them together instead of
-  // sequentially. This route is on the hot path (every submit), and each extra
-  // round trip to the DB is directly felt as UI lag.
-  const [challengeRow, lock] = await Promise.all([
+  // Challenge + lock + timer-expiry are independent reads — fetch them together
+  // instead of sequentially. This route is on the hot path (every submit), and
+  // each extra round trip to the DB is directly felt as UI lag.
+  const [challengeRow, lock, timerExpired] = await Promise.all([
     prisma.challenge.findUnique({ where: { id: challengeId } }),
     prisma.challengeLock.findUnique({ where: { id: challengeId } }),
+    isChallengeTimerExpired(challengeId),
   ]);
   if (!challengeRow) {
     return NextResponse.json({ error: 'Challenge not found' }, { status: 404 });
   }
   if (lock && lock.locked) {
     return NextResponse.json({ error: 'Challenge is locked' }, { status: 423 });
+  }
+  // Enforced server-side, not just a disabled button — the leaderboard is shared,
+  // so a submission after time's up would be an unfair advantage over everyone
+  // who worked within the window.
+  if (timerExpired) {
+    return NextResponse.json({ error: "Time's up for this challenge — submissions are closed." }, { status: 423 });
   }
   const vulnerableLines: number[] = JSON.parse(challengeRow.vulnerableLines);
   const explanations: Record<number, string> = JSON.parse(challengeRow.explanations);
