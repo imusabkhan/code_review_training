@@ -1171,9 +1171,6 @@ export default function CodeReviewChallenge() {
             <div className="text-center mb-8">
               <h1 className="text-3xl font-bold text-center">Code Review Challenge</h1>
               <p className="text-gray-600 text-center">Choose a challenge to test your skills</p>
-              <div className="mt-2 text-sm text-gray-500">
-                💡 <strong>Timer Info:</strong> Timers can be started from the admin panel. When active, they appear in the bottom-right corner of challenge cards.
-              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {challengesLoading ? (
