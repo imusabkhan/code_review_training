@@ -166,8 +166,15 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
 function TimerDisplay({ timeLeft }: { timeLeft: number }) {
   const min = Math.floor(timeLeft / 60);
   const sec = timeLeft % 60;
+  // Last 10 seconds get the "ticker" treatment — red + pulsing — for a bit of
+  // pressure, timed to the countdown sound in the main challenge view.
+  const isFinalCountdown = timeLeft <= 10;
   return (
-    <span className="inline-block px-3 py-1 bg-blue-100 text-blue-800 rounded font-mono text-lg min-w-[70px] text-center">
+    <span
+      className={`inline-block px-3 py-1 rounded font-mono text-lg min-w-[70px] text-center ${
+        isFinalCountdown ? 'bg-red-100 text-red-700 animate-pulse' : 'bg-blue-100 text-blue-800'
+      }`}
+    >
       {min}:{sec.toString().padStart(2, '0')}
     </span>
   );
@@ -870,6 +877,26 @@ export default function CodeReviewChallenge() {
   const { timer: challengeTimer, timeLeft: challengeTimeLeft } = useChallengeTimer(selectedChallenge);
   const { panelIndex: codePanelIndex, revealData, revealLoading, timerExpired, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
 
+  // Final-10-seconds countdown sound — plays once per timer run, right as the
+  // clock crosses into single digits, for the "pressure" effect. Keyed off
+  // timer.startTime (not just timeLeft<=10) so the 250ms tick interval doesn't
+  // retrigger it on every tick while time sits in that window.
+  const countdownAudioRef = useRef<HTMLAudioElement | null>(null);
+  const countdownPlayedForRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!challengeTimer || !challengeTimer.isRunning || challengeTimer.isPaused) return;
+    if (challengeTimeLeft <= 0 || challengeTimeLeft > 10) return;
+    if (countdownPlayedForRef.current === challengeTimer.startTime) return;
+    countdownPlayedForRef.current = challengeTimer.startTime;
+    countdownAudioRef.current?.play().catch(() => {});
+  }, [challengeTimeLeft, challengeTimer]);
+  // A new timer run (or leaving the challenge) clears the "already played" guard.
+  useEffect(() => {
+    countdownPlayedForRef.current = null;
+    countdownAudioRef.current?.pause();
+    if (countdownAudioRef.current) countdownAudioRef.current.currentTime = 0;
+  }, [selectedChallenge?.id, challengeTimer?.startTime]);
+
   const fetchAttemptsMap = useCallback(() => {
     fetch('/api/player-attempts')
       .then(res => res.json())
@@ -1288,6 +1315,7 @@ export default function CodeReviewChallenge() {
                     <div className="flex items-center gap-4 mb-4">
                       {/* Timer display for all users and admin */}
                       <ChallengeTimer timeLeft={challengeTimeLeft} timer={challengeTimer} />
+                      <audio ref={countdownAudioRef} src="/sounds/countdown-10s.mp3" preload="auto" />
                       {codePanelIndex === CODE_PANEL_EXPLANATION && (
                         <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
                           <AlertTriangle className="h-3.5 w-3.5" /> Exact Vulnerability
