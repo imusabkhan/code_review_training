@@ -596,12 +596,22 @@ function ResizableCard({ children, defaultWidth = 0 }: { children: React.ReactNo
 }
 
 // --- ChallengeTimer component ---
-function ChallengeTimer({ timeLeft }: { timeLeft: number }) {
+function ChallengeTimer({ timeLeft, timer }: { timeLeft: number; timer: { isRunning: boolean; isPaused: boolean } | null }) {
   if (timeLeft > 0) {
     return <TimerDisplay timeLeft={timeLeft} />;
   }
 
-  // Show "No Timer" state when no timer is running
+  // A timer that ran its course (and is blocking submissions) reads very
+  // differently from a challenge that was never timed at all — don't collapse
+  // both into "No Timer".
+  if (timer && timer.isRunning && !timer.isPaused) {
+    return (
+      <span className="inline-block px-3 py-1 bg-red-100 text-red-700 rounded font-mono text-lg min-w-[70px] text-center">
+        Time&apos;s Up
+      </span>
+    );
+  }
+
   return (
     <span className="inline-block px-3 py-1 bg-gray-100 text-gray-600 rounded font-mono text-lg min-w-[70px] text-center">
       No Timer
@@ -1189,8 +1199,16 @@ export default function CodeReviewChallenge() {
                           <TimerDisplay timeLeft={timeLeft} />
                         </div>
                       )}
-                      {/* Show "No Timer" when no timer is running */}
-                      {(!timer || (!timer.isRunning && !timer.isPaused) || timeLeft === 0) && (
+                      {/* Timer ran out and is actively blocking submissions — distinct from never having a timer */}
+                      {(timer && timer.isRunning && !timer.isPaused && timeLeft === 0) && (
+                        <div className="absolute bottom-3 right-3 z-10">
+                          <span className="inline-block px-2 py-1 bg-red-100 text-red-700 rounded text-xs font-mono">
+                            Time&apos;s Up
+                          </span>
+                        </div>
+                      )}
+                      {/* Show "No Timer" when no timer is running (also covers the rare case of a paused timer at exactly 0:00) */}
+                      {(!timer || (!timer.isRunning && !timer.isPaused) || (timer.isPaused && timeLeft === 0)) && (
                         <div className="absolute bottom-3 right-3 z-10">
                           <span className="inline-block px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-mono">
                             No Timer
@@ -1269,7 +1287,7 @@ export default function CodeReviewChallenge() {
                   <CardContent>
                     <div className="flex items-center gap-4 mb-4">
                       {/* Timer display for all users and admin */}
-                      <ChallengeTimer timeLeft={challengeTimeLeft} />
+                      <ChallengeTimer timeLeft={challengeTimeLeft} timer={challengeTimer} />
                       {codePanelIndex === CODE_PANEL_EXPLANATION && (
                         <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
                           <AlertTriangle className="h-3.5 w-3.5" /> Exact Vulnerability
