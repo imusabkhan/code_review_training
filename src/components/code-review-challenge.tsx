@@ -1,5 +1,5 @@
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, ArrowRight, Lightbulb, Lock, Unlock, ChevronLeft, ChevronRight } from "lucide-react"
@@ -808,6 +808,58 @@ const CODE_PANEL_COUNT = 3;
 
 type RevealData = { vulnerableLines: number[]; explanations: Record<number, string>; fixedCode: string };
 
+// The fixed-code example has no admin-authored "which line is the fix"
+// metadata (unlike vulnerableLines, which is). Rather than add a schema field
+// just for a highlight, derive it: an LCS line diff against the vulnerable
+// code tells us exactly which lines in fixedCode are new/changed — those are
+// the lines the fix actually touched.
+function computeChangedLines(oldCode: string, newCode: string): number[] {
+  const oldLines = oldCode.split('\n');
+  const newLines = newCode.split('\n');
+  const m = oldLines.length;
+  const n = newLines.length;
+  const lcs: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      lcs[i][j] = oldLines[i] === newLines[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const changed: number[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (oldLines[i] === newLines[j]) {
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      i++; // line only in old (removed) — doesn't mark anything in new
+    } else {
+      changed.push(j + 1); // 1-indexed, matches vulnerableLines convention
+      j++;
+    }
+  }
+  while (j < n) {
+    changed.push(j + 1);
+    j++;
+  }
+  return changed;
+}
+
+// react-syntax-highlighter's <code> tag keeps the theme's own (slightly
+// lighter) background by default and stays display:inline — fine normally,
+// but once wrapLines splits the content across many lines, an inline
+// element's background paints as a separate fragment per visual line instead
+// of one clean rectangle, so it looks like every line got "boxed". Forcing
+// block display (while keeping the theme's own code-tag styling) collapses
+// it back to a single paint.
+const BLOCK_CODE_TAG_PROPS = {
+  className: 'language-javascript',
+  style: {
+    ...(oneDark['code[class*="language-"]'] as Record<string, unknown>),
+    display: 'block',
+  },
+};
+
 function useFixReveal(
   selectedChallenge: PlayerChallenge | null,
   timer: { startTime: number; duration: number; isRunning: boolean; isPaused: boolean } | null
@@ -1102,6 +1154,11 @@ export default function CodeReviewChallenge() {
   const { timers: allTimers, timeLefts: allTimeLefts } = useAllChallengeTimers();
   const { timer: challengeTimer, timeLeft: challengeTimeLeft, nextLabOpensIn } = useChallengeTimer(selectedChallenge);
   const { panelIndex: codePanelIndex, revealData, revealLoading, timerExpired, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
+
+  const fixedChangedLines = useMemo(() => {
+    if (!selectedChallenge || !revealData?.fixedCode) return [];
+    return computeChangedLines(selectedChallenge.code, revealData.fixedCode);
+  }, [selectedChallenge, revealData?.fixedCode]);
 
   // So the vulnerable line is the thing you see, not something you have to go
   // hunting for — scroll it into the middle of the panel the moment the
@@ -1737,6 +1794,7 @@ export default function CodeReviewChallenge() {
                             language="javascript"
                             style={oneDark}
                             customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
+                            codeTagProps={BLOCK_CODE_TAG_PROPS}
                             showLineNumbers
                             wrapLines
                             lineProps={(lineNumber: number) => {
@@ -1769,6 +1827,7 @@ export default function CodeReviewChallenge() {
                                 language="javascript"
                                 style={oneDark}
                                 customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
+                                codeTagProps={BLOCK_CODE_TAG_PROPS}
                                 showLineNumbers
                                 wrapLines
                                 lineProps={(lineNumber: number) => {
@@ -1807,7 +1866,17 @@ export default function CodeReviewChallenge() {
                               language="javascript"
                               style={oneDark}
                               customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
+                              codeTagProps={BLOCK_CODE_TAG_PROPS}
                               showLineNumbers
+                              wrapLines
+                              lineProps={(lineNumber: number) => {
+                                const isFixed = fixedChangedLines.includes(lineNumber);
+                                // Same treatment as the vulnerable-line highlight, just green
+                                // instead of red — only the fixed line should stand out.
+                                return {
+                                  className: isFixed ? 'bg-green-600/40 border-l-4 border-green-400 -ml-1 pl-1 font-semibold' : '',
+                                };
+                              }}
                               lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
                             >
                               {revealData.fixedCode}
