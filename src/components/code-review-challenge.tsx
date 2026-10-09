@@ -8,6 +8,7 @@ import { MAX_CHALLENGE_ATTEMPTS } from "@/lib/constants"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { io, Socket } from 'socket.io-client'
+import { VulnerabilityVisual } from '@/components/vulnerability-visual'
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4001';
 
@@ -1774,6 +1775,9 @@ export default function CodeReviewChallenge() {
                               >
                                 {selectedChallenge.code}
                               </SyntaxHighlighter>
+                              <div className="mt-4">
+                                <VulnerabilityVisual challengeId={selectedChallenge.id} />
+                              </div>
                               <div className="mt-3 space-y-2">
                                 {(revealData?.vulnerableLines ?? []).map((lineNumber) => (
                                   <div key={lineNumber} className="rounded border-l-4 border-red-400 bg-red-950/40 p-2">
