@@ -15,13 +15,8 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Secure Code Review Training",
   description: "Interactive platform for security vulnerability training and code review practice",
-  icons: {
-    icon: [
-      { url: '/icon.jpeg', type: 'image/jpeg' },
-    ],
-    shortcut: '/icon.jpeg',
-    apple: '/icon.jpeg',
-  },
+  // No manual `icons` entry — favicon.ico, icon.png, and apple-icon.png in
+  // this directory are picked up automatically by Next.js's file convention.
 };
 
 export default function RootLayout({

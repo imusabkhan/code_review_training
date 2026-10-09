@@ -104,15 +104,18 @@ export default function AdminDashboard() {
 
       console.log('Lock updated successfully');
 
-      // Reset timer if locking the challenge
-      if (newLocked) {
-        try {
-          const socket = io(SOCKET_URL, { transports: ['websocket'] });
+      // Broadcast the new lock state live, and reset the timer if locking —
+      // without this, a player already on the page only learns a lab opened
+      // (or closed) by going back and refreshing.
+      try {
+        const socket = io(SOCKET_URL, { transports: ['websocket'] });
+        socket.emit('admin:setLock', { challengeId: id, locked: newLocked });
+        if (newLocked) {
           socket.emit('admin:resetTimer', { challengeId: id });
-          socket.disconnect();
-        } catch (socketError) {
-          console.error('Socket error:', socketError);
         }
+        socket.disconnect();
+      } catch (socketError) {
+        console.error('Socket error:', socketError);
       }
     } catch (error) {
       console.error('Error toggling lock:', error);

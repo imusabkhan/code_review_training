@@ -114,6 +114,14 @@ io.on('connection', (socket) => {
     io.emit('timer:update', { challengeId, startTime: 0, duration: 0, isRunning: false, isPaused: false });
   });
 
+  // Admin locks/unlocks a challenge — relayed live so a player sitting on the
+  // next-lab button (or the challenge grid) sees it open the instant the admin
+  // unlocks it, with no back-and-refresh needed. Persistence is handled
+  // separately by POST /api/challenge-locks; this is purely the live broadcast.
+  socket.on('admin:setLock', ({ challengeId, locked }: { challengeId: string; locked: boolean }) => {
+    io.emit('lock:update', { challengeId, locked });
+  });
+
   // Admin manually reveals/hides the fixed-code panel (e.g. for a challenge with
   // no timer running, or to show it ahead of/again after the timer finishing)
   socket.on('admin:revealFix', ({ challengeId }) => {

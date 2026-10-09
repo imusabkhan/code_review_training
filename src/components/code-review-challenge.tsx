@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, Lightbulb, Lock, Unlock, ChevronLeft, ChevronRight } from "lucide-react"
+import { CheckCircle, XCircle, AlertTriangle, ArrowLeft, ArrowRight, Lightbulb, Lock, Unlock, ChevronLeft, ChevronRight } from "lucide-react"
 import type { PlayerChallenge, ChallengeSummary } from "@/types/challenge"
 import { MAX_CHALLENGE_ATTEMPTS } from "@/lib/constants"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -921,6 +921,21 @@ export default function CodeReviewChallenge() {
     fetchChallenges();
   }, [fetchAttemptsMap]); // fetchAttemptsMap is useCallback-stable — this still only runs once on mount
 
+  // Keep lock state live — without this, a challenge the admin unlocks mid-session
+  // stays "locked" for anyone already on the page until they go back and refresh,
+  // which is exactly the friction we're trying to remove from the next-lab flow.
+  useEffect(() => {
+    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    const handleLockUpdate = (data: { challengeId: string; locked: boolean }) => {
+      setLocks((prev) => ({ ...prev, [data.challengeId]: data.locked }));
+    };
+    socket.on('lock:update', handleLockUpdate);
+    return () => {
+      socket.off('lock:update', handleLockUpdate);
+      socket.disconnect();
+    };
+  }, []);
+
   const handleCodeSubmit = async (code: string) => {
     setClaimingCode(true);
     setClaimError("");
@@ -1251,10 +1266,49 @@ export default function CodeReviewChallenge() {
   // In the challenge view, add a check for locked
   const isLocked = locks[selectedChallenge.id] !== false;
 
+  // The next challenge in sequence (challenges is already order-sorted by the
+  // API) — lets a finished player move straight on without going back to the
+  // grid. Locks is kept live (see the lock:update socket effect above), so
+  // this reflects an admin unlock the instant it happens, no refresh needed.
+  const currentIndex = challenges.findIndex((c) => c.id === selectedChallenge.id);
+  const nextChallenge = currentIndex >= 0 ? challenges[currentIndex + 1] ?? null : null;
+  const nextChallengeLocked = nextChallenge ? locks[nextChallenge.id] !== false : false;
+
   return (
     <>
       <UserBar name={user.name} avatar={user.avatar} score={user.score} />
-      <div className="min-h-screen bg-gray-50 p-4">
+      {/* Fixed to the viewport, not the page flow — visible the instant you solve
+          something, with zero scrolling, no matter how long the page is or where
+          you're scrolled to. Locks are live (see the lock:update socket effect),
+          so "next lab" unlocks here the moment the admin opens it. */}
+      {(alreadySolved || flagAlreadySolved) && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 border-t bg-white shadow-[0_-4px_16px_rgba(0,0,0,0.1)]">
+          <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-center">
+            {nextChallenge ? (
+              nextChallengeLocked ? (
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <Lock className="h-4 w-4 shrink-0" />
+                  Next lab — {nextChallenge.title} — isn't open yet. It'll unlock automatically as soon as your instructor opens it.
+                </div>
+              ) : (
+                <Button
+                  className="bg-green-600 hover:bg-green-700 text-white"
+                  onClick={() => handleSelectChallenge(nextChallenge)}
+                >
+                  Next Challenge: {nextChallenge.title}
+                  <ArrowRight className="h-4 w-4 ml-2" />
+                </Button>
+              )
+            ) : (
+              <div className="flex items-center gap-2 text-sm font-semibold text-green-700">
+                <CheckCircle className="h-4 w-4 shrink-0" />
+                You've completed every available challenge!
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      <div className={`min-h-screen bg-gray-50 p-4 ${(alreadySolved || flagAlreadySolved) ? 'pb-24' : ''}`}>
         <div className="max-w-6xl mx-auto space-y-6">
           <div className="flex flex-col md:flex-row md:items-start md:gap-6">
             <div className="flex-1">
@@ -1284,19 +1338,30 @@ export default function CodeReviewChallenge() {
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <div className="flex items-center gap-4 mb-4">
-                      {/* Timer display for all users and admin */}
-                      <ChallengeTimer timeLeft={challengeTimeLeft} timer={challengeTimer} />
-                      <audio ref={countdownAudioRef} src="/sounds/countdown-10s.mp3" preload="auto" />
-                      {codePanelIndex === CODE_PANEL_EXPLANATION && (
-                        <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
-                          <AlertTriangle className="h-3.5 w-3.5" /> Exact Vulnerability
-                        </span>
-                      )}
-                      {codePanelIndex === CODE_PANEL_FIXED && (
-                        <span className="flex items-center gap-1 rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700">
-                          <CheckCircle className="h-3.5 w-3.5" /> Fixed / Secure Code
-                        </span>
+                    <div className="flex items-center justify-between gap-4 mb-4">
+                      <div className="flex items-center gap-4">
+                        {/* Timer display for all users and admin */}
+                        <ChallengeTimer timeLeft={challengeTimeLeft} timer={challengeTimer} />
+                        <audio ref={countdownAudioRef} src="/sounds/countdown-10s.mp3" preload="auto" />
+                        {codePanelIndex === CODE_PANEL_EXPLANATION && (
+                          <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
+                            <AlertTriangle className="h-3.5 w-3.5" /> Exact Vulnerability
+                          </span>
+                        )}
+                        {codePanelIndex === CODE_PANEL_FIXED && (
+                          <span className="flex items-center gap-1 rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700">
+                            <CheckCircle className="h-3.5 w-3.5" /> Fixed / Secure Code
+                          </span>
+                        )}
+                      </div>
+                      {/* Fixed, always-visible spot for Show Hints — same place on every
+                          challenge regardless of code length, instead of living below the
+                          code block where it scrolled out of sight on longer snippets. */}
+                      {codePanelIndex === CODE_PANEL_VULNERABLE && !submitted && selectedChallenge.hints && (
+                        <Button variant="outline" size="sm" onClick={() => setShowHints(!showHints)}>
+                          <Lightbulb className="h-4 w-4 mr-2" />
+                          {showHints ? "Hide Hints" : "Show Hints"}
+                        </Button>
                       )}
                     </div>
                     <div className="relative overflow-hidden rounded-lg group">
@@ -1361,15 +1426,6 @@ export default function CodeReviewChallenge() {
                           >
                             {selectedChallenge.code}
                           </SyntaxHighlighter>
-                          {/* Show Hints button left-aligned with code block */}
-                          {!submitted && selectedChallenge.hints && (
-                            <div className="mt-2">
-                              <Button variant="outline" size="sm" onClick={() => setShowHints(!showHints)}>
-                                <Lightbulb className="h-4 w-4 mr-2" />
-                                {showHints ? "Hide Hints" : "Show Hints"}
-                              </Button>
-                            </div>
-                          )}
                         </div>
                         {/* Panel 2: exact vulnerability — the real vulnerable lines highlighted,
                             read-only (no click-to-select, this isn't scored), with explanations
@@ -1425,6 +1481,20 @@ export default function CodeReviewChallenge() {
                         </div>
                       </div>
                     </div>
+
+                    {/* Hint content renders right below the code it's about, directly under
+                        the Show Hints toggle above — not buried past the submit row, the
+                        flag form, and the solved-status card like before. */}
+                    {showHints && selectedChallenge.hints && !submitted && (
+                      <div className="mt-4 p-4 bg-blue-50 border-l-4 border-blue-400 rounded">
+                        <h4 className="font-medium text-blue-800 mb-2">💡 Hints:</h4>
+                        <ul className="text-sm text-blue-700 space-y-1">
+                          {selectedChallenge.hints.map((hint, index) => (
+                            <li key={index}>• {hint}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
 
                     <div className="mt-4 flex items-center justify-between">
                       {/* Result indicator lives right next to the Submit/Try Again button —
@@ -1617,17 +1687,6 @@ export default function CodeReviewChallenge() {
                         </Card>
                       </div>
                     </div>
-
-                    {showHints && selectedChallenge.hints && !submitted && (
-                      <div className="mt-4 p-4 bg-blue-50 border-l-4 border-blue-400 rounded">
-                        <h4 className="font-medium text-blue-800 mb-2">💡 Hints:</h4>
-                        <ul className="text-sm text-blue-700 space-y-1">
-                          {selectedChallenge.hints.map((hint, index) => (
-                            <li key={index}>• {hint}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
                   </CardContent>
                 </Card>
               </ResizableCard>
