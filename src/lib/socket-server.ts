@@ -137,6 +137,18 @@ io.on('connection', (socket) => {
     io.emit('fix:hide', { challengeId });
   });
 
+  // A client asks "is this specific challenge already revealed?" — needed
+  // because the connection-time resync below only fires on a fresh socket
+  // connection, not when a player switches challenges client-side (e.g. the
+  // "Next Challenge" bar) within an already-open connection. Without this,
+  // navigating in-app to a challenge revealed before this navigation leaves
+  // the player stuck thinking it's still hidden.
+  socket.on('query:revealStatus', ({ challengeId }: { challengeId: string }) => {
+    if (challengeFixRevealed[challengeId]) {
+      socket.emit('fix:reveal', { challengeId });
+    }
+  });
+
   // Admin does a full reset (paired with POST /api/admin-reset clearing the DB) —
   // wipes every in-memory timer and fix-reveal, for every challenge, and tells
   // every connected client so stale state from a demo/mock run never bleeds into

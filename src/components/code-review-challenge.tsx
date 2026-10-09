@@ -845,6 +845,15 @@ function useFixReveal(
     };
     socket.on('fix:reveal', onReveal);
     socket.on('fix:hide', onHide);
+    // The server only resyncs reveal state on a fresh socket *connection* —
+    // switching challenges in-app (e.g. the "Next Challenge" bar) reuses the
+    // same long-lived connection, so no connection event fires for it. Ask
+    // explicitly whether THIS challenge is already revealed; the server
+    // replies with the same 'fix:reveal' event onReveal already handles.
+    // Otherwise a challenge revealed before this navigation would stay
+    // stuck showing no carousel arrow until a brand new live broadcast or a
+    // full page reload.
+    socket.emit('query:revealStatus', { challengeId: selectedChallenge.id });
     return () => {
       socket.off('fix:reveal', onReveal);
       socket.off('fix:hide', onHide);
