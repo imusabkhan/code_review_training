@@ -409,7 +409,12 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
 
   const handleStartTimer = (challengeId: string) => {
     const durationMinutes = timerDurations[challengeId] || 5; // default 5 min
-    socketRef.current?.emit('admin:startTimer', { challengeId, duration: durationMinutes * 60 * 1000, chainBufferMs: chainBufferSec * 1000 });
+    // DEMO is just a walkthrough, not a real timed lab — skip the grace-period
+    // countdown before the next challenge opens; it should unlock right as
+    // DEMO's own clock runs out, not make everyone sit through the same gap
+    // real labs use.
+    const chainBufferMs = challengeId === 'DEMO' ? 0 : chainBufferSec * 1000;
+    socketRef.current?.emit('admin:startTimer', { challengeId, duration: durationMinutes * 60 * 1000, chainBufferMs });
   };
 
   const handleDurationChange = (challengeId: string, value: string) => {
