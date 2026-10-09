@@ -11,8 +11,11 @@ const io = new Server(httpServer, {
 // Set to track unique user IDs
 const activeUsers = new Set<string>();
 
-// Timer state per challenge
-const challengeTimers: Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused?: boolean; pausedAt?: number; remaining?: number }> = {};
+// Timer state per challenge. chainBufferMs is purely informational — the grace
+// period (set from the admin dashboard) between this lab's timer expiring and
+// the next lab auto-opening, broadcast through so every client can show a
+// countdown to that moment rather than just going dark until it happens.
+const challengeTimers: Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused?: boolean; pausedAt?: number; remaining?: number; chainBufferMs?: number }> = {};
 
 // Fixed-code reveal state per challenge (manual admin override — the automatic
 // reveal-on-timer-expiry is computed independently per client from timer state)
@@ -65,7 +68,7 @@ io.on('connection', (socket) => {
   });
 
   // Admin starts timer for a challenge
-  socket.on('admin:startTimer', ({ challengeId, duration }) => {
+  socket.on('admin:startTimer', ({ challengeId, duration, chainBufferMs }) => {
     const now = Date.now();
     challengeTimers[challengeId] = {
       startTime: now,
@@ -74,6 +77,7 @@ io.on('connection', (socket) => {
       isPaused: false,
       pausedAt: undefined,
       remaining: undefined,
+      chainBufferMs: typeof chainBufferMs === 'number' ? chainBufferMs : undefined,
     };
     broadcastTimerUpdate(challengeId);
   });

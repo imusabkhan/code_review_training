@@ -120,8 +120,12 @@ function CodeModal({ open, onSubmit, submitting, claimError }: { open: boolean; 
 
 // --- Timer Hook ---
 function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
-  const [timer, setTimer] = useState<{ startTime: number; duration: number; isRunning: boolean; isPaused: boolean } | null>(null);
+  const [timer, setTimer] = useState<{ startTime: number; duration: number; isRunning: boolean; isPaused: boolean; chainBufferMs?: number } | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(0);
+  // Seconds until the next lab auto-opens, or null when that's not a known/
+  // applicable thing right now (timer still running, no chain buffer set,
+  // etc.) — only meaningful once this lab's OWN timer has actually expired.
+  const [nextLabOpensIn, setNextLabOpensIn] = useState<number | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
   // Reset immediately on every challenge switch (including via the Next
@@ -132,6 +136,7 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
   useEffect(() => {
     setTimer(null);
     setTimeLeft(0);
+    setNextLabOpensIn(null);
   }, [selectedChallenge?.id]);
 
   useEffect(() => {
@@ -140,9 +145,15 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
       socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
     }
     const socket = socketRef.current;
-    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number }) => {
+    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number }) => {
       if (data.challengeId === selectedChallenge.id) {
-        setTimer({ startTime: data.startTime, duration: data.duration, isRunning: data.isRunning, isPaused: !!data.isPaused });
+        setTimer({
+          startTime: data.startTime,
+          duration: data.duration,
+          isRunning: data.isRunning,
+          isPaused: !!data.isPaused,
+          ...(typeof data.chainBufferMs === 'number' ? { chainBufferMs: data.chainBufferMs } : {}),
+        });
         // If paused, set timeLeft to remaining
         if (data.isPaused && typeof data.remaining === 'number') {
           setTimeLeft(Math.max(0, Math.floor(data.remaining / 1000)));
@@ -158,6 +169,7 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
   useEffect(() => {
     if (!timer) {
       setTimeLeft(0);
+      setNextLabOpensIn(null);
       return;
     }
     if (timer.isPaused) {
@@ -166,6 +178,7 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
     }
     if (!timer.isRunning) {
       setTimeLeft(0);
+      setNextLabOpensIn(null);
       return;
     }
     // Compute immediately, not just on the first interval tick — otherwise, the
@@ -177,13 +190,22 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
       const now = Date.now();
       const end = timer.startTime + timer.duration;
       setTimeLeft(Math.max(0, Math.floor((end - now) / 1000)));
+      if (typeof timer.chainBufferMs === 'number') {
+        // Not the thing to show until THIS lab's own timer is actually done —
+        // before that, the regular timeLeft countdown is what matters.
+        if (now >= end) {
+          setNextLabOpensIn(Math.max(0, Math.ceil((end + timer.chainBufferMs - now) / 1000)));
+        } else {
+          setNextLabOpensIn(null);
+        }
+      }
     };
     tick();
     const interval = setInterval(tick, 250);
     return () => clearInterval(interval);
   }, [timer]);
 
-  return { timer, timeLeft };
+  return { timer, timeLeft, nextLabOpensIn };
 }
 
 // --- Timer Display ---
@@ -217,11 +239,23 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
   const [resetting, setResetting] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
   const [timerDurations, setTimerDurations] = useState<Record<string, number>>({});
-  const [timers, setTimers] = useState<Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number }>>({});
+  // Admin-controlled gap (seconds) between a lab's timer expiring and the next
+  // one auto-opening — shown to players as a countdown so they know how long
+  // to expect the wait, instead of the next lab just appearing with no notice.
+  const [chainBufferSec, setChainBufferSec] = useState(60);
+  const [timers, setTimers] = useState<Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number }>>({});
   const [timeLefts, setTimeLefts] = useState<Record<string, number>>({});
   const [fixRevealedMap, setFixRevealedMap] = useState<Record<string, boolean>>({});
   const [reorderingId, setReorderingId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  // Mirrors `timers` for the chain-continuation logic below, which needs to
+  // read the LATEST state at the moment a scheduled fire() actually runs
+  // (possibly minutes later) rather than the stale snapshot closed over when
+  // the effect that scheduled it last ran.
+  const timersRef = useRef(timers);
+  useEffect(() => {
+    timersRef.current = timers;
+  }, [timers]);
 
   // Debug logging
   console.log('AdminPanel received challenges:', challenges);
@@ -232,7 +266,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
       socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
     }
     const socket = socketRef.current;
-    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number }) => {
+    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number }) => {
       setTimers(prev => ({
         ...prev,
         [data.challengeId]: {
@@ -240,7 +274,8 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
           duration: data.duration,
           isRunning: data.isRunning,
           isPaused: data.isPaused,
-          ...(typeof data.remaining === 'number' ? { remaining: data.remaining } : {})
+          ...(typeof data.remaining === 'number' ? { remaining: data.remaining } : {}),
+          ...(typeof data.chainBufferMs === 'number' ? { chainBufferMs: data.chainBufferMs } : {}),
         }
       }));
       // Mirror into the DB so submit-challenge/submit-flag (a separate process
@@ -301,11 +336,6 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
     return () => clearInterval(interval);
   }, [timers]);
 
-  // A 60s grace period after a lab's timer genuinely expires, before the next
-  // one opens — long enough for players to see "Time's Up" and the reveal
-  // panel instead of being yanked into the next lab the instant it hits zero.
-  const CHAIN_BUFFER_MS = 60 * 1000;
-
   // Chains the whole sequence off a single manual Start Timer click: the
   // moment a running timer's real deadline (plus the buffer above) passes,
   // this unlocks the next challenge AND starts ITS timer with the same
@@ -325,6 +355,11 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
       // (reset then started again) is treated as unfired, not skipped as a dup.
       const key = `${challengeId}:${timer.startTime}`;
       if (autoUnlockedRef.current.has(key)) return;
+      // Use the buffer that was actually broadcast when THIS timer started
+      // (so what's scheduled here never drifts from what players were told),
+      // falling back to the current setting for a timer from before this
+      // field existed.
+      const bufferMs = typeof timer.chainBufferMs === 'number' ? timer.chainBufferMs : chainBufferSec * 1000;
       const fire = () => {
         autoUnlockedRef.current.add(key);
         fetch('/api/admin/auto-unlock-next', {
@@ -336,15 +371,33 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
           .then((data) => {
             if (data?.unlocked && data.nextChallengeId) {
               socketRef.current?.emit('admin:setLock', { challengeId: data.nextChallengeId, locked: false });
-              // Continue the chain — same duration as the lab that just
-              // finished, so the whole sequence keeps the same pace without
-              // the admin starting each one by hand.
-              socketRef.current?.emit('admin:startTimer', { challengeId: data.nextChallengeId, duration: timer.duration });
+              // A timer's isRunning never flips back to false on its own at
+              // expiry (expiry is computed from time elapsed, not tracked as
+              // a state transition) — it only changes via an explicit pause/
+              // resume/reset/start action. That means if this admin tab gets
+              // refreshed at any point after this exact link already fired
+              // once, the socket's reconnect-resync reports THIS challenge as
+              // still "running" and already past its deadline, and with no
+              // memory of having handled it before (autoUnlockedRef is
+              // in-memory, wiped by the refresh), this would fire again —
+              // re-unlocking the next challenge is harmless, but blindly
+              // re-emitting admin:startTimer would RESTART its timer from
+              // scratch even if it's already mid-countdown, silently
+              // extending the real wait past what was configured. Guard
+              // against that: only (re)start it if it isn't already running.
+              const nextTimer = timersRef.current[data.nextChallengeId];
+              const nextAlreadyRunning = !!nextTimer && nextTimer.isRunning && !nextTimer.isPaused;
+              if (!nextAlreadyRunning) {
+                // Continue the chain — same duration and buffer as the lab
+                // that just finished, so the whole sequence keeps the same
+                // pace without the admin starting each one by hand.
+                socketRef.current?.emit('admin:startTimer', { challengeId: data.nextChallengeId, duration: timer.duration, chainBufferMs: bufferMs });
+              }
             }
           })
           .catch(() => {});
       };
-      const fireInMs = timer.startTime + timer.duration + CHAIN_BUFFER_MS - Date.now();
+      const fireInMs = timer.startTime + timer.duration + bufferMs - Date.now();
       if (fireInMs <= 0) {
         fire();
       } else {
@@ -352,11 +405,11 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
       }
     });
     return () => scheduled.forEach(clearTimeout);
-  }, [timers]);
+  }, [timers, chainBufferSec]);
 
   const handleStartTimer = (challengeId: string) => {
     const durationMinutes = timerDurations[challengeId] || 5; // default 5 min
-    socketRef.current?.emit('admin:startTimer', { challengeId, duration: durationMinutes * 60 * 1000 });
+    socketRef.current?.emit('admin:startTimer', { challengeId, duration: durationMinutes * 60 * 1000, chainBufferMs: chainBufferSec * 1000 });
   };
 
   const handleDurationChange = (challengeId: string, value: string) => {
@@ -449,6 +502,20 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
         </Button>
         {resetSuccess && <span className="ml-4 text-green-700 font-semibold">Lab fully reset — scores, submissions, timers, and reveals all cleared!</span>}
       </div>
+      <div className="mb-6 flex items-center gap-2 text-sm">
+        <label htmlFor="chain-buffer-sec" className="text-gray-700">
+          Gap before the next lab auto-opens (seconds):
+        </label>
+        <input
+          id="chain-buffer-sec"
+          type="number"
+          min={0}
+          value={chainBufferSec}
+          onChange={(e) => setChainBufferSec(Math.max(0, parseInt(e.target.value) || 0))}
+          className="border rounded px-2 py-1 w-20"
+        />
+        <span className="text-xs text-gray-500">Applies the next time a lab's timer is started — shown to players as a countdown.</span>
+      </div>
       <div className="grid grid-cols-1 gap-4">
         {!challenges || challenges.length === 0 ? (
           <div className="text-center py-8">
@@ -459,6 +526,15 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
             const isLocked = locks[challenge.id] !== false; // default locked
             const timeLeft = getTimeLeft(challenge.id);
             const timer = timers[challenge.id];
+            // isRunning never flips back to false on its own once the deadline
+            // passes — expiry is deliberately computed from elapsed time, not
+            // tracked as a state transition (submission-blocking and the
+            // player-side "Time's Up" UI both depend on that staying true).
+            // Without this derived check, the dashboard would show Pause/Reset
+            // — and hide the duration input — forever for a timer that's
+            // actually long finished, which is exactly what let a stale
+            // "still running" timer get picked up again after a refresh.
+            const isGenuinelyActive = !!timer && timer.isRunning && !timer.isPaused && timeLeft > 0;
             return (
               <Card key={challenge.id}>
                 <CardHeader>
@@ -493,7 +569,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
                         >
                           {isLocked ? "Unlock" : "Lock"}
                         </Button>
-                        {!isLocked && (!timer || (!timer.isRunning && !timer.isPaused)) && (
+                        {!isLocked && !isGenuinelyActive && !timer?.isPaused && (
                           <input
                             type="number"
                             min={1}
@@ -507,7 +583,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
                       </div>
                       {!isLocked && (
                         <div className="flex flex-wrap items-center gap-2">
-                          {timer && timer.isRunning && !timer.isPaused ? (
+                          {isGenuinelyActive ? (
                             <>
                               <Button variant="secondary" onClick={() => handlePauseTimer(challenge.id)}>
                                 Pause Timer
@@ -526,9 +602,20 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
                               </Button>
                             </>
                           ) : (
-                            <Button variant="default" onClick={() => handleStartTimer(challenge.id)}>
-                              Start Timer
-                            </Button>
+                            <>
+                              <Button variant="default" onClick={() => handleStartTimer(challenge.id)}>
+                                Start Timer
+                              </Button>
+                              {/* Timer genuinely finished but the server still has a stale
+                                  entry for it — offer to explicitly clear it (which also
+                                  retracts "Time's Up" for anyone still viewing it) alongside
+                                  just starting a fresh run. */}
+                              {timer && (
+                                <Button variant="outline" size="sm" onClick={() => handleResetTimer(challenge.id)}>
+                                  Reset Timer
+                                </Button>
+                              )}
+                            </>
                           )}
                           {/* Timer display for admin: show if running or paused and time left > 0 */}
                           {(timer && (timer.isRunning || timer.isPaused) && timeLeft > 0) && <TimerDisplay timeLeft={timeLeft} />}
@@ -942,6 +1029,21 @@ export default function CodeReviewChallenge() {
 
   // Challenge state
   const [selectedChallenge, setSelectedChallenge] = useState<PlayerChallenge | null>(null)
+
+  // Keep the actively-open challenge in sync with the live challenges list.
+  // Without this, selectedChallenge is a snapshot frozen at the moment it was
+  // clicked — an admin content edit (fixing the vulnerable code, the
+  // fixed-code example, hints, etc.) while a player already has that
+  // challenge open would never reach them, even though `challenges` itself
+  // already gets refreshed live elsewhere (reconnect/tab-focus/back nav).
+  useEffect(() => {
+    if (!selectedChallenge) return;
+    const fresh = challenges.find((c) => c.id === selectedChallenge.id);
+    if (fresh && JSON.stringify(fresh) !== JSON.stringify(selectedChallenge)) {
+      setSelectedChallenge(fresh);
+    }
+  }, [challenges, selectedChallenge]);
+
   const [selectedLines, setSelectedLines] = useState<number[]>([])
   const [submitted, setSubmitted] = useState(false)
   const [showResults, setShowResults] = useState(false)
@@ -983,18 +1085,32 @@ export default function CodeReviewChallenge() {
 
   // Move this hook call here so it's always called, before any early returns
   const { timers: allTimers, timeLefts: allTimeLefts } = useAllChallengeTimers();
-  const { timer: challengeTimer, timeLeft: challengeTimeLeft } = useChallengeTimer(selectedChallenge);
+  const { timer: challengeTimer, timeLeft: challengeTimeLeft, nextLabOpensIn } = useChallengeTimer(selectedChallenge);
   const { panelIndex: codePanelIndex, revealData, revealLoading, timerExpired, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
 
   // So the vulnerable line is the thing you see, not something you have to go
   // hunting for — scroll it into the middle of the panel the moment the
   // walkthrough data loads, instead of leaving it wherever it happened to land
   // in a potentially long code block.
+  //
+  // Deliberately NOT using el.scrollIntoView() here — it walks the ENTIRE
+  // scroll chain, including the page itself, so centering a line inside the
+  // 480px code panel was also scrolling the whole page down. That carried the
+  // carousel's prev/next arrows (positioned near the top of the card) out of
+  // the viewport, making them look like they'd vanished. This scrolls only
+  // the panel's own internal overflow, computed manually from each element's
+  // position on screen so it works regardless of CSS positioning context.
   const vulnPanelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (codePanelIndex !== CODE_PANEL_EXPLANATION || !revealData) return;
-    const el = vulnPanelRef.current?.querySelector('[data-vuln-line="true"]');
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const container = vulnPanelRef.current;
+    const el = container?.querySelector<HTMLElement>('[data-vuln-line="true"]');
+    if (!container || !el) return;
+    const containerRect = container.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const offsetWithinContainer = elRect.top - containerRect.top + container.scrollTop;
+    const targetScrollTop = offsetWithinContainer - container.clientHeight / 2 + el.clientHeight / 2;
+    container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
   }, [codePanelIndex, revealData]);
 
   // Final-10-seconds countdown sound — plays once per timer run, right as the
@@ -1004,12 +1120,19 @@ export default function CodeReviewChallenge() {
   const countdownAudioRef = useRef<HTMLAudioElement | null>(null);
   const countdownPlayedForRef = useRef<number | null>(null);
   useEffect(() => {
+    // Deliberately silent on the demo — the whole point of a "how to play"
+    // walkthrough is to not give away what the real labs sound like. Keeping
+    // the sound a surprise the first time a real lab's timer runs out is more
+    // fun than having already heard it during the practice round. The visual
+    // countdown/pulse still happens on DEMO same as everywhere else — it's
+    // only the audio that's held back.
+    if (selectedChallenge?.id === 'DEMO') return;
     if (!challengeTimer || !challengeTimer.isRunning || challengeTimer.isPaused) return;
     if (challengeTimeLeft <= 0 || challengeTimeLeft > 10) return;
     if (countdownPlayedForRef.current === challengeTimer.startTime) return;
     countdownPlayedForRef.current = challengeTimer.startTime;
     countdownAudioRef.current?.play().catch(() => {});
-  }, [challengeTimeLeft, challengeTimer]);
+  }, [challengeTimeLeft, challengeTimer, selectedChallenge?.id]);
   // A new timer run (or leaving the challenge) clears the "already played" guard.
   useEffect(() => {
     countdownPlayedForRef.current = null;
@@ -1451,9 +1574,15 @@ export default function CodeReviewChallenge() {
   // than each player deciding for themselves the moment they're done. Once it's
   // unlocked, it's there for anyone to move on to, same as the challenge grid.
   const showNextChallengeBar = !!nextChallenge && !nextChallengeLocked;
+  // The current lab's timer has genuinely expired and we know how long until
+  // the chain opens the next one — show that countdown instead of nothing,
+  // so everyone (including whoever's presenting) knows how long to expect the
+  // wait rather than the next lab just appearing with no notice.
+  const showCountdownBar = !!nextChallenge && nextChallengeLocked && nextLabOpensIn !== null;
   // Only meaningful once there's genuinely nothing left to unlock — otherwise
   // this would falsely claim completion for someone who hasn't done anything.
   const showAllDoneBar = !nextChallenge && labCompleted;
+  const showBottomBar = showNextChallengeBar || showCountdownBar || showAllDoneBar;
 
   return (
     <>
@@ -1464,7 +1593,7 @@ export default function CodeReviewChallenge() {
           live (see the lock:update socket effect), so this appears the instant
           the admin unlocks the next lab — that's the control point, not whether
           this particular player has finished the current one. */}
-      {(showNextChallengeBar || showAllDoneBar) && (
+      {showBottomBar && (
         <div className="fixed bottom-0 left-0 right-0 z-40 border-t bg-white shadow-[0_-4px_16px_rgba(0,0,0,0.1)]">
           <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-center">
             {showNextChallengeBar && nextChallenge ? (
@@ -1475,6 +1604,16 @@ export default function CodeReviewChallenge() {
                 Next Challenge: {nextChallenge.title}
                 <ArrowRight className="h-4 w-4 ml-2" />
               </Button>
+            ) : showCountdownBar && nextChallenge ? (
+              <div className="flex items-center gap-3">
+                <span className="flex items-center gap-2 rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold text-gray-500">
+                  <Lock className="h-4 w-4 shrink-0" />
+                  Next Challenge: {nextChallenge.title}
+                </span>
+                <span className="font-mono text-sm font-bold text-gray-700">
+                  opens in {Math.floor((nextLabOpensIn ?? 0) / 60)}:{String((nextLabOpensIn ?? 0) % 60).padStart(2, '0')}
+                </span>
+              </div>
             ) : (
               <div className="flex items-center gap-2 text-sm font-semibold text-green-700">
                 <CheckCircle className="h-4 w-4 shrink-0" />
@@ -1484,7 +1623,7 @@ export default function CodeReviewChallenge() {
           </div>
         </div>
       )}
-      <div className={`min-h-screen bg-gray-50 p-4 ${(showNextChallengeBar || showAllDoneBar) ? 'pb-24' : ''}`}>
+      <div className={`min-h-screen bg-gray-50 p-4 ${showBottomBar ? 'pb-24' : ''}`}>
         <div className="max-w-6xl mx-auto space-y-6">
           <div className="flex flex-col md:flex-row md:items-start md:gap-6">
             <div className="flex-1">
@@ -1619,8 +1758,10 @@ export default function CodeReviewChallenge() {
                                 wrapLines
                                 lineProps={(lineNumber: number) => {
                                   const isVuln = !!revealData?.vulnerableLines.includes(lineNumber);
+                                  // Nothing else gets any className at all — the vulnerable line
+                                  // should be the one and only thing that looks different here.
                                   return {
-                                    className: isVuln ? 'bg-red-900/60 border-l-4 border-red-400 -ml-1 pl-1' : '',
+                                    className: isVuln ? 'bg-red-600/40 border-l-4 border-red-400 -ml-1 pl-1 font-semibold' : '',
                                     ...(isVuln ? { 'data-vuln-line': 'true' } : {}),
                                   };
                                 }}

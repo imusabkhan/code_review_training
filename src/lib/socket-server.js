@@ -64,7 +64,7 @@ io.on('connection', (socket) => {
   });
 
   // Admin starts timer for a challenge
-  socket.on('admin:startTimer', ({ challengeId, duration }) => {
+  socket.on('admin:startTimer', ({ challengeId, duration, chainBufferMs }) => {
     const now = Date.now();
     challengeTimers[challengeId] = {
       startTime: now,
@@ -73,6 +73,7 @@ io.on('connection', (socket) => {
       isPaused: false,
       pausedAt: undefined,
       remaining: undefined,
+      chainBufferMs: typeof chainBufferMs === 'number' ? chainBufferMs : undefined,
     };
     broadcastTimerUpdate(challengeId);
   });
