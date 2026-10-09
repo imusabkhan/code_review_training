@@ -120,3 +120,25 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Celebration confetti — a correct submission reward. Each particle drifts
+   sideways by its own --x-drift while falling and spinning, then fades near
+   the end so it doesn't just hard-cut off mid-fall. */
+@keyframes confetti-fall {
+  0% {
+    transform: translate3d(0, -10px, 0) rotate(0deg);
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(var(--x-drift, 0px), 100vh, 0) rotate(var(--spin, 360deg));
+    opacity: 0;
+  }
+}
+.animate-confetti-fall {
+  animation-name: confetti-fall;
+  animation-timing-function: ease-in;
+  animation-fill-mode: forwards;
+}

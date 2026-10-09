@@ -11,6 +11,56 @@ import { io, Socket } from 'socket.io-client'
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4001';
 
+const CONFETTI_COLORS = ['#f43f5e', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#ec4899'];
+
+// A little celebration for getting something right — purely decorative,
+// self-cleans after it finishes so it never lingers or blocks interaction.
+// Fires whenever `fireKey` changes to a truthy value (bump a counter on each
+// correct submission); 0/undefined never fires, so mounting doesn't trigger it.
+function ConfettiBurst({ fireKey }: { fireKey: number }) {
+  const [particles, setParticles] = useState<
+    { id: number; left: number; color: string; delay: number; duration: number; drift: number; spin: number; size: number }[]
+  >([]);
+
+  useEffect(() => {
+    if (!fireKey) return;
+    const next = Array.from({ length: 36 }, (_, i) => ({
+      id: i,
+      left: Math.random() * 100,
+      color: CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)],
+      delay: Math.random() * 0.3,
+      duration: 1.8 + Math.random() * 1.2,
+      drift: (Math.random() - 0.5) * 220,
+      spin: (360 + Math.random() * 360) * (Math.random() < 0.5 ? -1 : 1),
+      size: 6 + Math.random() * 6,
+    }));
+    setParticles(next);
+    const t = setTimeout(() => setParticles([]), 3200);
+    return () => clearTimeout(t);
+  }, [fireKey]);
+
+  if (particles.length === 0) return null;
+  return (
+    <div className="fixed inset-0 z-[60] pointer-events-none overflow-hidden" aria-hidden="true">
+      {particles.map((p) => (
+        <span
+          key={p.id}
+          className="absolute top-0 animate-confetti-fall rounded-sm"
+          style={{
+            left: `${p.left}%`,
+            width: p.size,
+            height: p.size * 0.4,
+            backgroundColor: p.color,
+            animationDelay: `${p.delay}s`,
+            animationDuration: `${p.duration}s`,
+            // CSS custom properties aren't in React's CSSProperties type
+            ...({ '--x-drift': `${p.drift}px`, '--spin': `${p.spin}deg` } as React.CSSProperties),
+          }}
+        />
+      ))}
+    </div>
+  );
+}
 
 function UserBar({ name, avatar, score }: { name: string; avatar: string; score: number }) {
   return (
@@ -155,10 +205,14 @@ function TimerDisplay({ timeLeft }: { timeLeft: number }) {
 }
 
 // --- AdminPanel with Timer Start ---
-export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
+export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChanged }: {
   locks: Record<string, boolean>,
   onToggleLock: (id: string) => void,
-  challenges?: ChallengeSummary[]
+  challenges?: ChallengeSummary[],
+  // Called whenever lock state may have changed outside of a direct
+  // onToggleLock click — right now, just "Reset Everything" wiping every
+  // ChallengeLock row. Lets the dashboard page (which owns `locks`) refetch.
+  onLocksChanged?: () => void,
 }) {
   const [resetting, setResetting] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
@@ -207,12 +261,18 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
     };
     socket.on('fix:reveal', handleFixReveal);
     socket.on('fix:hide', handleFixHide);
+    // Another admin window/tab (or this one, via the broadcast round-trip)
+    // just reset everything — ChallengeLock rows are gone, so refetch instead
+    // of leaving stale pre-reset lock badges/buttons on screen.
+    const handleLocksReset = () => onLocksChanged?.();
+    socket.on('locks:reset', handleLocksReset);
     return () => {
       socket.off('timer:update', handleTimerUpdate);
       socket.off('fix:reveal', handleFixReveal);
       socket.off('fix:hide', handleFixHide);
+      socket.off('locks:reset', handleLocksReset);
     };
-  }, []);
+  }, [onLocksChanged]);
 
   // Update ticking timers for admin
   useEffect(() => {
@@ -320,6 +380,10 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
     setTimers({});
     setTimeLefts({});
     setFixRevealedMap({});
+    // Don't wait on the socket round-trip for our OWN dashboard to catch up —
+    // every ChallengeLock row is gone now, so refresh immediately rather than
+    // showing stale pre-reset lock badges/buttons until the broadcast lands.
+    onLocksChanged?.();
     setResetting(false);
     if (res.ok) setResetSuccess(true);
   };
@@ -734,7 +798,11 @@ function useFixReveal(
   useEffect(() => {
     if (!revealEligible || !selectedChallenge || revealData !== null || revealLoading) return;
     setRevealLoading(true);
-    fetch(`/api/challenges/${selectedChallenge.id}/reveal`)
+    // Challenge ids are free-text (admin-chosen) and can contain characters like
+    // "#" that would otherwise get parsed as a URL fragment and silently
+    // truncate the path — e.g. "challenge#1" became a request for "challenge",
+    // which 404'd and quietly fell back to "no fixed-code example yet".
+    fetch(`/api/challenges/${encodeURIComponent(selectedChallenge.id)}/reveal`)
       .then((res) => res.json())
       .then((data) =>
         setRevealData({
@@ -829,6 +897,8 @@ export default function CodeReviewChallenge() {
   // Bumped whenever OUR OWN score just changed, so the leaderboard can refetch
   // immediately instead of waiting for its 5s ambient poll.
   const [leaderboardRefreshSignal, setLeaderboardRefreshSignal] = useState(0);
+  // Bumped on every correct answer/flag — see ConfettiBurst.
+  const [confettiKey, setConfettiKey] = useState(0);
   // Leaderboard data lives up here, not inside the Leaderboard component itself —
   // that component used to own its own fetch/state, so it only started loading
   // the moment it first mounted (i.e. the moment you opened a challenge), which
@@ -916,6 +986,17 @@ export default function CodeReviewChallenge() {
   const { timer: challengeTimer, timeLeft: challengeTimeLeft } = useChallengeTimer(selectedChallenge);
   const { panelIndex: codePanelIndex, revealData, revealLoading, timerExpired, canGoPrev: canGoPrevPanel, canGoNext: canGoNextPanel, goPrev: goPrevPanel, goNext: goNextPanel } = useFixReveal(selectedChallenge, challengeTimer);
 
+  // So the vulnerable line is the thing you see, not something you have to go
+  // hunting for — scroll it into the middle of the panel the moment the
+  // walkthrough data loads, instead of leaving it wherever it happened to land
+  // in a potentially long code block.
+  const vulnPanelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (codePanelIndex !== CODE_PANEL_EXPLANATION || !revealData) return;
+    const el = vulnPanelRef.current?.querySelector('[data-vuln-line="true"]');
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [codePanelIndex, revealData]);
+
   // Final-10-seconds countdown sound — plays once per timer run, right as the
   // clock crosses into single digits, for the "pressure" effect. Keyed off
   // timer.startTime (not just timeLeft<=10) so the 250ms tick interval doesn't
@@ -943,6 +1024,30 @@ export default function CodeReviewChallenge() {
       .catch(() => {});
   }, []);
 
+  const fetchLocks = useCallback(() => {
+    fetch('/api/challenge-locks')
+      .then(res => res.json())
+      .then(data => setLocks(data))
+      .catch(() => {});
+  }, []);
+
+  const fetchChallenges = useCallback(async () => {
+    try {
+      setChallengesLoading(true);
+      const res = await fetch('/api/challenges');
+      if (res.ok) {
+        const data = await res.json();
+        setChallenges(data);
+      } else {
+        console.error('Failed to fetch challenges:', res.status);
+      }
+    } catch (error) {
+      console.error('Error fetching challenges:', error);
+    } finally {
+      setChallengesLoading(false);
+    }
+  }, []);
+
   // On mount: ask the server who this browser's session cookie says we are
   // (if anyone), and fetch locks/challenges. There is no client-side identity
   // to restore — the httpOnly session cookie is the only source of truth.
@@ -959,46 +1064,45 @@ export default function CodeReviewChallenge() {
       })
       .catch(() => setShowCodeModal(true));
 
-    // Fetch locks from API
-    fetch('/api/challenge-locks')
-      .then(res => res.json())
-      .then(data => setLocks(data));
-
-    // Fetch challenges from the public, answer-free API
-    const fetchChallenges = async () => {
-      try {
-        setChallengesLoading(true);
-        const res = await fetch('/api/challenges');
-        if (res.ok) {
-          const data = await res.json();
-          setChallenges(data);
-        } else {
-          console.error('Failed to fetch challenges:', res.status);
-        }
-      } catch (error) {
-        console.error('Error fetching challenges:', error);
-      } finally {
-        setChallengesLoading(false);
-      }
-    };
-
+    fetchLocks();
     fetchChallenges();
-  }, [fetchAttemptsMap]); // fetchAttemptsMap is useCallback-stable — this still only runs once on mount
+  }, [fetchAttemptsMap, fetchLocks, fetchChallenges]); // all useCallback-stable — this still only runs once on mount
 
   // Keep lock state live — without this, a challenge the admin unlocks mid-session
   // stays "locked" for anyone already on the page until they go back and refresh,
   // which is exactly the friction we're trying to remove from the next-lab flow.
+  // Live broadcasts alone aren't enough, though: they only reach a socket that's
+  // actively connected at the exact moment the admin unlocks something. A tab
+  // that was backgrounded (e.g. the player alt-tabbed to the external lab) can
+  // miss the broadcast entirely if its socket dropped in the meantime — so this
+  // also refetches the current state outright on every (re)connect and whenever
+  // the tab regains focus, instead of relying purely on catching a live event.
   useEffect(() => {
     const socket = io(SOCKET_URL, { transports: ['websocket'] });
     const handleLockUpdate = (data: { challengeId: string; locked: boolean }) => {
       setLocks((prev) => ({ ...prev, [data.challengeId]: data.locked }));
     };
     socket.on('lock:update', handleLockUpdate);
+    socket.on('connect', fetchLocks);
+    // Admin reset wipes every ChallengeLock row (everything reverts to
+    // locked-by-default) — the socket server can't name specific challenge
+    // ids for that, so it just signals "go refetch" instead.
+    socket.on('locks:reset', fetchLocks);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        fetchLocks();
+        fetchChallenges();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       socket.off('lock:update', handleLockUpdate);
+      socket.off('connect', fetchLocks);
+      socket.off('locks:reset', fetchLocks);
+      document.removeEventListener('visibilitychange', handleVisibility);
       socket.disconnect();
     };
-  }, []);
+  }, [fetchLocks, fetchChallenges]);
 
   const handleCodeSubmit = async (code: string) => {
     setClaimingCode(true);
@@ -1144,6 +1248,7 @@ export default function CodeReviewChallenge() {
           // to reflect it, both on our own badge and on the shared leaderboard.
           if (typeof data.score === 'number') setUser(u => ({ ...u, score: data.score }));
           setLeaderboardRefreshSignal(s => s + 1);
+          setConfettiKey(k => k + 1);
         }
         setSubmitToast({ status: data.correct ? 'correct' : 'incorrect' });
       } else if (res.status === 423) {
@@ -1189,6 +1294,10 @@ export default function CodeReviewChallenge() {
     setRevealedVulnerableLines([]);
     setRevealedExplanations({});
     setSubmitToast(null);
+    // Catch up on anything that changed while on the challenge page — e.g. an
+    // admin unlocking a lab whose broadcast this tab's socket happened to miss.
+    fetchLocks();
+    fetchChallenges();
   }
 
   const toggleLine = (lineNumber: number) => {
@@ -1349,6 +1458,7 @@ export default function CodeReviewChallenge() {
   return (
     <>
       <UserBar name={user.name} avatar={user.avatar} score={user.score} />
+      <ConfettiBurst fireKey={confettiKey} />
       {/* Fixed to the viewport, not the page flow — visible with zero scrolling,
           no matter how long the page is or where you're scrolled to. Locks are
           live (see the lock:update socket effect), so this appears the instant
@@ -1496,7 +1606,7 @@ export default function CodeReviewChallenge() {
                         {/* Panel 2: exact vulnerability — the real vulnerable lines highlighted,
                             read-only (no click-to-select, this isn't scored), with explanations
                             so the walkthrough can happen right here instead of switching to slides */}
-                        <div className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto overflow-y-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%`, height: 480 }}>
+                        <div ref={vulnPanelRef} className="shrink-0 bg-gray-900 rounded-lg p-4 overflow-x-auto overflow-y-auto" style={{ width: `${100 / CODE_PANEL_COUNT}%`, height: 480 }}>
                           {revealLoading ? (
                             <div className="py-8 text-center text-sm text-gray-400">Loading…</div>
                           ) : (
@@ -1507,9 +1617,13 @@ export default function CodeReviewChallenge() {
                                 customStyle={{ background: 'transparent', fontSize: 14, margin: 0, padding: 0 }}
                                 showLineNumbers
                                 wrapLines
-                                lineProps={(lineNumber: number) => ({
-                                  className: revealData?.vulnerableLines.includes(lineNumber) ? 'bg-red-900/50' : '',
-                                })}
+                                lineProps={(lineNumber: number) => {
+                                  const isVuln = !!revealData?.vulnerableLines.includes(lineNumber);
+                                  return {
+                                    className: isVuln ? 'bg-red-900/60 border-l-4 border-red-400 -ml-1 pl-1' : '',
+                                    ...(isVuln ? { 'data-vuln-line': 'true' } : {}),
+                                  };
+                                }}
                                 lineNumberStyle={{ minWidth: 32, color: '#888', textAlign: 'right', userSelect: 'none', marginRight: 16 }}
                               >
                                 {selectedChallenge.code}
@@ -1662,7 +1776,10 @@ export default function CodeReviewChallenge() {
                               } else if (data.success && data.correct) {
                                 setFlagChallengeStatus({ status: 'success', message: data.alreadySolved ? 'Already solved!' : 'Correct flag! +5 points' });
                                 setUser(u => ({ ...u, score: data.score }));
-                                if (!data.alreadySolved) setLeaderboardRefreshSignal(s => s + 1);
+                                if (!data.alreadySolved) {
+                                  setLeaderboardRefreshSignal(s => s + 1);
+                                  setConfettiKey(k => k + 1);
+                                }
                                 refreshSolvedStates();
                               } else if (data.success && data.alreadySolved) {
                                 setFlagChallengeStatus({ status: 'already', message: 'Already solved!' });

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { AdminPanel } from "@/components/code-review-challenge"
 import { ChallengeEditor } from "@/components/admin/challenge-editor"
@@ -39,6 +39,12 @@ export default function AdminDashboard() {
     });
   }, [challenges, loading]);
 
+  const fetchLocks = useCallback(() => {
+    fetch(`/api/challenge-locks`)
+      .then(res => res.json())
+      .then(data => setLocks(data));
+  }, []);
+
   useEffect(() => {
     // Only allow access if admin session
     fetch(`/api/admin-login`, { method: 'GET' })
@@ -47,17 +53,12 @@ export default function AdminDashboard() {
         if (!data.authenticated) {
           router.replace("/admin");
         } else {
-          // Fetch locks from API
-          fetch(`/api/challenge-locks`)
-            .then(res => res.json())
-            .then(data => setLocks(data));
-
-          // Fetch challenges
+          fetchLocks();
           fetchChallenges();
         }
         setLoading(false);
       });
-  }, [router]);
+  }, [router, fetchLocks]);
 
   const fetchChallenges = async () => {
     try {
@@ -155,7 +156,10 @@ export default function AdminDashboard() {
 
   const handleDeleteChallenge = async (id: string) => {
     try {
-      const res = await fetch(`/api/admin/challenges?id=${id}`, {
+      // Challenge ids are free-text and can contain "#"/"&"/etc. which would
+      // otherwise get parsed as a URL fragment or extra query param and
+      // silently delete (or fail to delete) the wrong thing.
+      const res = await fetch(`/api/admin/challenges?id=${encodeURIComponent(id)}`, {
         method: 'DELETE',
       });
 
@@ -256,7 +260,7 @@ export default function AdminDashboard() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <AdminPanel locks={locks} onToggleLock={handleToggleLock} challenges={challenges} />
+                <AdminPanel locks={locks} onToggleLock={handleToggleLock} challenges={challenges} onLocksChanged={fetchLocks} />
               </CardContent>
             </Card>
           </TabsContent>

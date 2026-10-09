@@ -92,7 +92,7 @@ export function PlayerAccessPanel() {
 
   const handleDelete = async (player: InvitedPlayer) => {
     if (!confirm(`Revoke access for ${player.email}? They won't be able to sign in with their code anymore.`)) return
-    const res = await fetch(`/api/admin/invited-players?id=${player.id}`, { method: "DELETE" })
+    const res = await fetch(`/api/admin/invited-players?id=${encodeURIComponent(player.id)}`, { method: "DELETE" })
     if (res.ok) {
       setPlayers((prev) => prev.filter((p) => p.id !== player.id))
     }

@@ -146,6 +146,14 @@ io.on('connection', (socket) => {
       io.emit('timer:update', { challengeId, startTime: 0, duration: 0, isRunning: false, isPaused: false });
       io.emit('fix:hide', { challengeId });
     });
+    // POST /api/admin-reset (which the admin dashboard calls alongside this)
+    // also deletes every ChallengeLock row, meaning every challenge reverts to
+    // locked-by-default. This server has no DB access and doesn't know the
+    // specific challenge ids to send real lock:update events for, so instead
+    // it tells every client (admin dashboard included) to go re-fetch
+    // /api/challenge-locks itself — otherwise lock state shown on screen stays
+    // stuck at whatever it was right before the reset.
+    io.emit('locks:reset');
   });
 
   // On user connect, send current timer state for all running timers
