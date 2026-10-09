@@ -74,6 +74,16 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const socketRef = useRef<Socket | null>(null);
 
+  // Reset immediately on every challenge switch (including via the Next
+  // Challenge bar) — otherwise a PREVIOUS challenge's timer (possibly already
+  // expired) lingers here until a fresh timer:update happens to arrive for the
+  // new one, which never happens for a challenge with no timer running at all.
+  // Without this, the next lab opens already showing "Time's Up".
+  useEffect(() => {
+    setTimer(null);
+    setTimeLeft(0);
+  }, [selectedChallenge?.id]);
+
   useEffect(() => {
     if (!selectedChallenge) return;
     if (!socketRef.current) {
@@ -229,6 +239,59 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
     recompute();
     const interval = setInterval(recompute, 250);
     return () => clearInterval(interval);
+  }, [timers]);
+
+  // A 60s grace period after a lab's timer genuinely expires, before the next
+  // one opens — long enough for players to see "Time's Up" and the reveal
+  // panel instead of being yanked into the next lab the instant it hits zero.
+  const CHAIN_BUFFER_MS = 60 * 1000;
+
+  // Chains the whole sequence off a single manual Start Timer click: the
+  // moment a running timer's real deadline (plus the buffer above) passes,
+  // this unlocks the next challenge AND starts ITS timer with the same
+  // duration — which lands back in `timers` via the normal timer:update
+  // listener and re-triggers this same effect for that challenge, continuing
+  // the chain on its own. Scheduled off the real startTime+duration (not a
+  // fixed delay from when Start Timer was clicked), the same pattern already
+  // used for the player-side reveal/expiry logic, so it's correct even if
+  // this admin tab gets refreshed mid-chain — the socket re-syncs current
+  // timer state on reconnect and this reschedules from that.
+  const autoUnlockedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const scheduled: NodeJS.Timeout[] = [];
+    Object.entries(timers).forEach(([challengeId, timer]) => {
+      if (!timer.isRunning || timer.isPaused) return;
+      // Keyed by startTime so a genuinely new run of the same challenge's timer
+      // (reset then started again) is treated as unfired, not skipped as a dup.
+      const key = `${challengeId}:${timer.startTime}`;
+      if (autoUnlockedRef.current.has(key)) return;
+      const fire = () => {
+        autoUnlockedRef.current.add(key);
+        fetch('/api/admin/auto-unlock-next', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ challengeId }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (data?.unlocked && data.nextChallengeId) {
+              socketRef.current?.emit('admin:setLock', { challengeId: data.nextChallengeId, locked: false });
+              // Continue the chain — same duration as the lab that just
+              // finished, so the whole sequence keeps the same pace without
+              // the admin starting each one by hand.
+              socketRef.current?.emit('admin:startTimer', { challengeId: data.nextChallengeId, duration: timer.duration });
+            }
+          })
+          .catch(() => {});
+      };
+      const fireInMs = timer.startTime + timer.duration + CHAIN_BUFFER_MS - Date.now();
+      if (fireInMs <= 0) {
+        fire();
+      } else {
+        scheduled.push(setTimeout(fire, fireInMs));
+      }
+    });
+    return () => scheduled.forEach(clearTimeout);
   }, [timers]);
 
   const handleStartTimer = (challengeId: string) => {
@@ -428,30 +491,10 @@ export function AdminPanel({ locks, onToggleLock, challenges = [] }: {
   );
 }
 
-function Leaderboard({ currentUser, refreshSignal }: { currentUser: { name: string; avatar: string; score: number }; refreshSignal?: number }) {
-  const [users, setUsers] = useState<{ name: string; avatar: string; score: number }[]>([]);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  const fetchLeaderboard = useCallback(() => {
-    fetch('/api/leaderboard')
-      .then(res => res.json())
-      .then(setUsers);
-  }, []);
-
-  // Poll every 5 seconds for ambient updates from OTHER players
-  useEffect(() => {
-    fetchLeaderboard();
-    intervalRef.current = setInterval(fetchLeaderboard, 5000);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [fetchLeaderboard]);
-
-  // Refetch immediately when the parent bumps this after OUR OWN score just
-  // changed — otherwise the player could wait up to 5s to see their own new
-  // score/rank after a correct submission, which reads as "nothing happened."
-  useEffect(() => {
-    if (refreshSignal === undefined || refreshSignal === 0) return;
-    fetchLeaderboard();
-  }, [refreshSignal, fetchLeaderboard]);
+function Leaderboard({ currentUser, users }: { currentUser: { name: string; avatar: string; score: number }; users: { name: string; avatar: string; score: number }[] }) {
+  // Purely presentational — data is fetched and polled by the parent (see
+  // leaderboardUsers in CodeReviewChallenge) so this component has something to
+  // show immediately on mount instead of starting from empty every time.
 
   // If current user is not in the top, show them at the bottom
   const inTop = users.some(u => u.name === currentUser.name);
@@ -783,9 +826,30 @@ export default function CodeReviewChallenge() {
   // User state — identity lives in a server-issued session cookie (see
   // /api/player-session), never in localStorage or anything client-trusted.
   const [user, setUser] = useState({ name: "", avatar: "", score: 0 });
-  // Bumped whenever OUR OWN score just changed, so the Leaderboard widget can
-  // refetch immediately instead of waiting for its 5s ambient poll.
+  // Bumped whenever OUR OWN score just changed, so the leaderboard can refetch
+  // immediately instead of waiting for its 5s ambient poll.
   const [leaderboardRefreshSignal, setLeaderboardRefreshSignal] = useState(0);
+  // Leaderboard data lives up here, not inside the Leaderboard component itself —
+  // that component used to own its own fetch/state, so it only started loading
+  // the moment it first mounted (i.e. the moment you opened a challenge), which
+  // showed as an empty-then-populated flash right when you landed on the page.
+  // Fetching from app load instead means it's already warm by the time anyone
+  // navigates into a challenge.
+  const [leaderboardUsers, setLeaderboardUsers] = useState<{ name: string; avatar: string; score: number }[]>([]);
+  const fetchLeaderboard = useCallback(() => {
+    fetch('/api/leaderboard')
+      .then(res => res.json())
+      .then(setLeaderboardUsers);
+  }, []);
+  useEffect(() => {
+    fetchLeaderboard();
+    const interval = setInterval(fetchLeaderboard, 5000);
+    return () => clearInterval(interval);
+  }, [fetchLeaderboard]);
+  useEffect(() => {
+    if (leaderboardRefreshSignal === 0) return;
+    fetchLeaderboard();
+  }, [leaderboardRefreshSignal, fetchLeaderboard]);
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [claimingCode, setClaimingCode] = useState(false);
   const [claimError, setClaimError] = useState("");
@@ -1267,38 +1331,40 @@ export default function CodeReviewChallenge() {
   const isLocked = locks[selectedChallenge.id] !== false;
 
   // The next challenge in sequence (challenges is already order-sorted by the
-  // API) — lets a finished player move straight on without going back to the
-  // grid. Locks is kept live (see the lock:update socket effect above), so
+  // API). Locks is kept live (see the lock:update socket effect above), so
   // this reflects an admin unlock the instant it happens, no refresh needed.
   const currentIndex = challenges.findIndex((c) => c.id === selectedChallenge.id);
   const nextChallenge = currentIndex >= 0 ? challenges[currentIndex + 1] ?? null : null;
   const nextChallengeLocked = nextChallenge ? locks[nextChallenge.id] !== false : false;
+  const labCompleted = alreadySolved && flagAlreadySolved;
+  // The admin's unlock is the gate, not individual completion — the instructor
+  // controls pacing for everyone by choosing when to open the next lab, rather
+  // than each player deciding for themselves the moment they're done. Once it's
+  // unlocked, it's there for anyone to move on to, same as the challenge grid.
+  const showNextChallengeBar = !!nextChallenge && !nextChallengeLocked;
+  // Only meaningful once there's genuinely nothing left to unlock — otherwise
+  // this would falsely claim completion for someone who hasn't done anything.
+  const showAllDoneBar = !nextChallenge && labCompleted;
 
   return (
     <>
       <UserBar name={user.name} avatar={user.avatar} score={user.score} />
-      {/* Fixed to the viewport, not the page flow — visible the instant you solve
-          something, with zero scrolling, no matter how long the page is or where
-          you're scrolled to. Locks are live (see the lock:update socket effect),
-          so "next lab" unlocks here the moment the admin opens it. */}
-      {(alreadySolved || flagAlreadySolved) && (
+      {/* Fixed to the viewport, not the page flow — visible with zero scrolling,
+          no matter how long the page is or where you're scrolled to. Locks are
+          live (see the lock:update socket effect), so this appears the instant
+          the admin unlocks the next lab — that's the control point, not whether
+          this particular player has finished the current one. */}
+      {(showNextChallengeBar || showAllDoneBar) && (
         <div className="fixed bottom-0 left-0 right-0 z-40 border-t bg-white shadow-[0_-4px_16px_rgba(0,0,0,0.1)]">
           <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-center">
-            {nextChallenge ? (
-              nextChallengeLocked ? (
-                <div className="flex items-center gap-2 text-sm text-gray-500">
-                  <Lock className="h-4 w-4 shrink-0" />
-                  Next lab — {nextChallenge.title} — isn't open yet. It'll unlock automatically as soon as your instructor opens it.
-                </div>
-              ) : (
-                <Button
-                  className="bg-green-600 hover:bg-green-700 text-white"
-                  onClick={() => handleSelectChallenge(nextChallenge)}
-                >
-                  Next Challenge: {nextChallenge.title}
-                  <ArrowRight className="h-4 w-4 ml-2" />
-                </Button>
-              )
+            {showNextChallengeBar && nextChallenge ? (
+              <Button
+                className="bg-green-600 hover:bg-green-700 text-white"
+                onClick={() => handleSelectChallenge(nextChallenge)}
+              >
+                Next Challenge: {nextChallenge.title}
+                <ArrowRight className="h-4 w-4 ml-2" />
+              </Button>
             ) : (
               <div className="flex items-center gap-2 text-sm font-semibold text-green-700">
                 <CheckCircle className="h-4 w-4 shrink-0" />
@@ -1308,7 +1374,7 @@ export default function CodeReviewChallenge() {
           </div>
         </div>
       )}
-      <div className={`min-h-screen bg-gray-50 p-4 ${(alreadySolved || flagAlreadySolved) ? 'pb-24' : ''}`}>
+      <div className={`min-h-screen bg-gray-50 p-4 ${(showNextChallengeBar || showAllDoneBar) ? 'pb-24' : ''}`}>
         <div className="max-w-6xl mx-auto space-y-6">
           <div className="flex flex-col md:flex-row md:items-start md:gap-6">
             <div className="flex-1">
@@ -1532,34 +1598,35 @@ export default function CodeReviewChallenge() {
                         )}
                       </div>
 
-                      <div className="space-x-2">
+                      <div className="flex gap-2">
+                        {/* Always available, regardless of submission state — a wrong
+                            answer used to hide this, cutting the player off from the lab
+                            right when they need to go back and look again. */}
+                        {(() => {
+                          const labUrl = selectedChallenge.labUrl || '';
+                          const fullUrl = getDynamicLabUrl(labUrl);
+                          return (
+                            <a
+                              href={fullUrl || '#'}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <Button
+                                type="button"
+                                className="bg-blue-100 text-blue-700 hover:bg-blue-200 border-blue-200"
+                                variant="outline"
+                                disabled={!labUrl}
+                                title={fullUrl || 'No URL set'}
+                              >
+                                Go to Lab
+                              </Button>
+                            </a>
+                          );
+                        })()}
                         {!submitted || lastSubmissionCorrect === true ? (
-                          <div className="flex gap-2">
-                            {(() => {
-                              const labUrl = selectedChallenge.labUrl || '';
-                              const fullUrl = getDynamicLabUrl(labUrl);
-                              return (
-                                <a
-                                  href={fullUrl || '#'}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  <Button
-                                    type="button"
-                                    className="bg-blue-100 text-blue-700 hover:bg-blue-200 border-blue-200"
-                                    variant="outline"
-                                    disabled={!labUrl}
-                                    title={fullUrl || 'No URL set'}
-                                  >
-                                    Go to Lab
-                                  </Button>
-                                </a>
-                              );
-                            })()}
-                            <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || attemptsRemaining === null || isLocked || timerExpired}>
-                              Submit Answer
-                            </Button>
-                          </div>
+                          <Button onClick={handleSubmit} disabled={selectedLines.length === 0 || alreadySolved || attemptsRemaining === 0 || attemptsRemaining === null || isLocked || timerExpired}>
+                            Submit Answer
+                          </Button>
                         ) : (
                           <Button onClick={handleReset} variant="outline">
                             Try Again
@@ -1716,7 +1783,7 @@ export default function CodeReviewChallenge() {
             </div>
             {/* Leaderboard on the right */}
             <div className="w-full mt-24 md:w-[400px] flex-shrink-0 md:self-start">
-              <Leaderboard currentUser={user} refreshSignal={leaderboardRefreshSignal} />
+              <Leaderboard currentUser={user} users={leaderboardUsers} />
             </div>
           </div>
         </div>
