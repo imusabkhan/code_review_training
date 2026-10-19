@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { AdminPanel } from "@/components/code-review-challenge"
 import { ChallengeEditor } from "@/components/admin/challenge-editor"
@@ -17,7 +17,7 @@ import {
   Lock,
   LogOut
 } from "lucide-react"
-import { io } from 'socket.io-client'
+import { io, Socket } from 'socket.io-client'
 import type { Challenge } from "@/types/challenge"
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4001';
@@ -29,6 +29,32 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("challenges");
   const router = useRouter();
+  // A persistent connection, not a fresh one per click — a socket created and
+  // emitted on synchronously, then immediately disconnected, is a race: the
+  // underlying handshake hasn't finished, so disconnect() can abort the
+  // connection before the emit is ever flushed to the server, silently
+  // dropping the broadcast. Reusing one long-lived socket (same pattern as
+  // AdminPanel's own socketRef) sidesteps the race entirely.
+  const socketRef = useRef<Socket | null>(null);
+  useEffect(() => {
+    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    socketRef.current = socket;
+    // Without this, this dashboard's own lock badges/buttons go stale the
+    // instant something OTHER than this admin's own click changes a lock —
+    // most notably the auto-advance chain unlocking the next lab on its own.
+    // Players see it live (they listen for the same broadcast); the admin who
+    // set auto-advance up would otherwise have no on-screen confirmation it
+    // actually fired without a manual refresh.
+    const handleLockUpdate = (data: { challengeId: string; locked: boolean }) => {
+      setLocks(prev => ({ ...prev, [data.challengeId]: data.locked }));
+    };
+    socket.on('lock:update', handleLockUpdate);
+    return () => {
+      socket.off('lock:update', handleLockUpdate);
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, []);
 
   // Debug challenges state
   useEffect(() => {
@@ -109,12 +135,10 @@ export default function AdminDashboard() {
       // without this, a player already on the page only learns a lab opened
       // (or closed) by going back and refreshing.
       try {
-        const socket = io(SOCKET_URL, { transports: ['websocket'] });
-        socket.emit('admin:setLock', { challengeId: id, locked: newLocked });
+        socketRef.current?.emit('admin:setLock', { challengeId: id, locked: newLocked });
         if (newLocked) {
-          socket.emit('admin:resetTimer', { challengeId: id });
+          socketRef.current?.emit('admin:resetTimer', { challengeId: id });
         }
-        socket.disconnect();
       } catch (socketError) {
         console.error('Socket error:', socketError);
       }

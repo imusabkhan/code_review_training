@@ -63,8 +63,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Admin starts timer for a challenge
-  socket.on('admin:startTimer', ({ challengeId, duration, chainBufferMs }) => {
+  // Admin starts timer for a challenge. autoAdvance opts this run into the
+  // chain-to-next-lab behavior — when false (the default a trainer running a
+  // live session wants), the timer still counts down and players still see
+  // "time's up, waiting for instructor" once it expires, but nothing unlocks
+  // on its own; the admin unlocks the next lab by hand, whenever Q&A wraps.
+  socket.on('admin:startTimer', ({ challengeId, duration, chainBufferMs, autoAdvance }) => {
     const now = Date.now();
     challengeTimers[challengeId] = {
       startTime: now,
@@ -74,6 +78,7 @@ io.on('connection', (socket) => {
       pausedAt: undefined,
       remaining: undefined,
       chainBufferMs: typeof chainBufferMs === 'number' ? chainBufferMs : undefined,
+      autoAdvance: !!autoAdvance,
     };
     broadcastTimerUpdate(challengeId);
   });
@@ -142,6 +147,20 @@ io.on('connection', (socket) => {
   socket.on('query:revealStatus', ({ challengeId }) => {
     if (challengeFixRevealed[challengeId]) {
       socket.emit('fix:reveal', { challengeId });
+    }
+  });
+
+  // Same gap, same fix, for timers: a challenge whose timer was already
+  // started (e.g. auto-advance's chain starting the next lab's timer before
+  // the player ever navigates there) shows no countdown at all to a player
+  // who switches to it client-side, since the connection-time resync below
+  // only fires on a genuinely fresh connection. Ask explicitly for this one
+  // challenge's current timer state; the reply reuses the same 'timer:update'
+  // event the player already listens for.
+  socket.on('query:timerStatus', ({ challengeId }) => {
+    const timer = challengeTimers[challengeId];
+    if (timer && (timer.isRunning || timer.isPaused)) {
+      socket.emit('timer:update', { challengeId, ...timer });
     }
   });
 

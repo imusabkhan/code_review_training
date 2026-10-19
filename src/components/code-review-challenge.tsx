@@ -121,7 +121,7 @@ function CodeModal({ open, onSubmit, submitting, claimError }: { open: boolean; 
 
 // --- Timer Hook ---
 function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
-  const [timer, setTimer] = useState<{ startTime: number; duration: number; isRunning: boolean; isPaused: boolean; chainBufferMs?: number } | null>(null);
+  const [timer, setTimer] = useState<{ startTime: number; duration: number; isRunning: boolean; isPaused: boolean; chainBufferMs?: number; autoAdvance?: boolean } | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(0);
   // Seconds until the next lab auto-opens, or null when that's not a known/
   // applicable thing right now (timer still running, no chain buffer set,
@@ -146,7 +146,7 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
       socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
     }
     const socket = socketRef.current;
-    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number }) => {
+    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number; autoAdvance?: boolean }) => {
       if (data.challengeId === selectedChallenge.id) {
         setTimer({
           startTime: data.startTime,
@@ -154,6 +154,7 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
           isRunning: data.isRunning,
           isPaused: !!data.isPaused,
           ...(typeof data.chainBufferMs === 'number' ? { chainBufferMs: data.chainBufferMs } : {}),
+          autoAdvance: !!data.autoAdvance,
         });
         // If paused, set timeLeft to remaining
         if (data.isPaused && typeof data.remaining === 'number') {
@@ -162,6 +163,13 @@ function useChallengeTimer(selectedChallenge: PlayerChallenge | null) {
       }
     };
     socket.on('timer:update', handleTimerUpdate);
+    // Same reasoning as useFixReveal's query:revealStatus — this socket
+    // persists across in-app challenge switches, so the server's own
+    // connection-time resync never re-fires for a challenge whose timer was
+    // already running before this navigation (exactly what auto-advance's
+    // chain does to the lab it just opened). Ask explicitly instead of
+    // waiting on a live broadcast that already happened.
+    socket.emit('query:timerStatus', { challengeId: selectedChallenge.id });
     return () => {
       socket.off('timer:update', handleTimerUpdate);
     };
@@ -244,7 +252,14 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
   // one auto-opening — shown to players as a countdown so they know how long
   // to expect the wait, instead of the next lab just appearing with no notice.
   const [chainBufferSec, setChainBufferSec] = useState(60);
-  const [timers, setTimers] = useState<Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number }>>({});
+  // Off by default — a live, trainer-led session can't predict how long Q&A
+  // on each lab will run, so auto-advancing off a fixed buffer either cuts
+  // discussion short or leaves dead air. With this off, the timer still
+  // counts down and players still see "time's up, waiting for instructor"
+  // once it expires, but the next lab only unlocks when the admin does it by
+  // hand (Challenge Locks tab) — turn it on per-lab for an unattended run.
+  const [autoAdvance, setAutoAdvance] = useState(false);
+  const [timers, setTimers] = useState<Record<string, { startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number; autoAdvance?: boolean }>>({});
   const [timeLefts, setTimeLefts] = useState<Record<string, number>>({});
   const [fixRevealedMap, setFixRevealedMap] = useState<Record<string, boolean>>({});
   const [reorderingId, setReorderingId] = useState<string | null>(null);
@@ -267,7 +282,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
       socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
     }
     const socket = socketRef.current;
-    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number }) => {
+    const handleTimerUpdate = (data: { challengeId: string; startTime: number; duration: number; isRunning: boolean; isPaused: boolean; remaining?: number; chainBufferMs?: number; autoAdvance?: boolean }) => {
       setTimers(prev => ({
         ...prev,
         [data.challengeId]: {
@@ -277,6 +292,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
           isPaused: data.isPaused,
           ...(typeof data.remaining === 'number' ? { remaining: data.remaining } : {}),
           ...(typeof data.chainBufferMs === 'number' ? { chainBufferMs: data.chainBufferMs } : {}),
+          autoAdvance: !!data.autoAdvance,
         }
       }));
       // Mirror into the DB so submit-challenge/submit-flag (a separate process
@@ -352,6 +368,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
     const scheduled: NodeJS.Timeout[] = [];
     Object.entries(timers).forEach(([challengeId, timer]) => {
       if (!timer.isRunning || timer.isPaused) return;
+      if (!timer.autoAdvance) return;
       // Keyed by startTime so a genuinely new run of the same challenge's timer
       // (reset then started again) is treated as unfired, not skipped as a dup.
       const key = `${challengeId}:${timer.startTime}`;
@@ -392,7 +409,7 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
                 // Continue the chain — same duration and buffer as the lab
                 // that just finished, so the whole sequence keeps the same
                 // pace without the admin starting each one by hand.
-                socketRef.current?.emit('admin:startTimer', { challengeId: data.nextChallengeId, duration: timer.duration, chainBufferMs: bufferMs });
+                socketRef.current?.emit('admin:startTimer', { challengeId: data.nextChallengeId, duration: timer.duration, chainBufferMs: bufferMs, autoAdvance: true });
               }
             }
           })
@@ -410,12 +427,14 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
 
   const handleStartTimer = (challengeId: string) => {
     const durationMinutes = timerDurations[challengeId] || 5; // default 5 min
-    // DEMO is just a walkthrough, not a real timed lab — skip the grace-period
-    // countdown before the next challenge opens; it should unlock right as
-    // DEMO's own clock runs out, not make everyone sit through the same gap
-    // real labs use.
-    const chainBufferMs = challengeId === 'DEMO' ? 0 : chainBufferSec * 1000;
-    socketRef.current?.emit('admin:startTimer', { challengeId, duration: durationMinutes * 60 * 1000, chainBufferMs });
+    // Only send a buffer when auto-advance is actually on — otherwise the
+    // player-side countdown bar would tick down to an unlock that was never
+    // going to happen, which is more misleading than just not showing it.
+    // DEMO is just a walkthrough, not a real timed lab — when auto-advance IS
+    // on for it, skip the grace-period gap real labs use so it unlocks right
+    // as DEMO's own clock runs out instead of making everyone wait through it.
+    const chainBufferMs = !autoAdvance ? undefined : challengeId === 'DEMO' ? 0 : chainBufferSec * 1000;
+    socketRef.current?.emit('admin:startTimer', { challengeId, duration: durationMinutes * 60 * 1000, chainBufferMs, autoAdvance });
   };
 
   const handleDurationChange = (challengeId: string, value: string) => {
@@ -509,18 +528,32 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
         {resetSuccess && <span className="ml-4 text-green-700 font-semibold">Lab fully reset — scores, submissions, timers, and reveals all cleared!</span>}
       </div>
       <div className="mb-6 flex items-center gap-2 text-sm">
-        <label htmlFor="chain-buffer-sec" className="text-gray-700">
-          Gap before the next lab auto-opens (seconds):
+        <label htmlFor="auto-advance" className="flex items-center gap-2 text-gray-700">
+          <input
+            id="auto-advance"
+            type="checkbox"
+            checked={autoAdvance}
+            onChange={(e) => setAutoAdvance(e.target.checked)}
+          />
+          Auto-advance to next lab
         </label>
-        <input
-          id="chain-buffer-sec"
-          type="number"
-          min={0}
-          value={chainBufferSec}
-          onChange={(e) => setChainBufferSec(Math.max(0, parseInt(e.target.value) || 0))}
-          className="border rounded px-2 py-1 w-20"
-        />
-        <span className="text-xs text-gray-500">Applies the next time a lab's timer is started — shown to players as a countdown.</span>
+        {autoAdvance ? (
+          <>
+            <label htmlFor="chain-buffer-sec" className="text-gray-700">
+              — gap before it auto-opens (seconds):
+            </label>
+            <input
+              id="chain-buffer-sec"
+              type="number"
+              min={0}
+              value={chainBufferSec}
+              onChange={(e) => setChainBufferSec(Math.max(0, parseInt(e.target.value) || 0))}
+              className="border rounded px-2 py-1 w-20"
+            />
+          </>
+        ) : (
+          <span className="text-xs text-gray-500">Off — when a lab's timer runs out, players see "waiting for instructor" and you unlock the next one yourself below, whenever you're ready.</span>
+        )}
       </div>
       <div className="grid grid-cols-1 gap-4">
         {!challenges || challenges.length === 0 ? (
@@ -1651,10 +1684,15 @@ export default function CodeReviewChallenge() {
   // so everyone (including whoever's presenting) knows how long to expect the
   // wait rather than the next lab just appearing with no notice.
   const showCountdownBar = !!nextChallenge && nextChallengeLocked && nextLabOpensIn !== null;
+  // Manual-advance mode (no chain buffer running): once THIS lab's own timer
+  // has genuinely run out, say so and name what's next instead of the bottom
+  // of the screen just going blank — the admin unlocks it by hand whenever
+  // they're actually ready, there's just nothing to count down to here.
+  const showLockedWaitingBar = !!nextChallenge && nextChallengeLocked && nextLabOpensIn === null && timerExpired;
   // Only meaningful once there's genuinely nothing left to unlock — otherwise
   // this would falsely claim completion for someone who hasn't done anything.
   const showAllDoneBar = !nextChallenge && labCompleted;
-  const showBottomBar = showNextChallengeBar || showCountdownBar || showAllDoneBar;
+  const showBottomBar = showNextChallengeBar || showCountdownBar || showLockedWaitingBar || showAllDoneBar;
 
   return (
     <>
@@ -1686,6 +1724,11 @@ export default function CodeReviewChallenge() {
                   opens in {Math.floor((nextLabOpensIn ?? 0) / 60)}:{String((nextLabOpensIn ?? 0) % 60).padStart(2, '0')}
                 </span>
               </div>
+            ) : showLockedWaitingBar && nextChallenge ? (
+              <span className="flex items-center gap-2 rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold text-gray-500">
+                <Lock className="h-4 w-4 shrink-0" />
+                Next Challenge: {nextChallenge.title} — waiting for instructor
+              </span>
             ) : (
               <div className="flex items-center gap-2 text-sm font-semibold text-green-700">
                 <CheckCircle className="h-4 w-4 shrink-0" />
