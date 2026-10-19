@@ -394,15 +394,15 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
               // a state transition) — it only changes via an explicit pause/
               // resume/reset/start action. That means if this admin tab gets
               // refreshed at any point after this exact link already fired
-              // once, the socket's reconnect-resync reports THIS challenge as
-              // still "running" and already past its deadline, and with no
-              // memory of having handled it before (autoUnlockedRef is
-              // in-memory, wiped by the refresh), this would fire again —
-              // re-unlocking the next challenge is harmless, but blindly
-              // re-emitting admin:startTimer would RESTART its timer from
-              // scratch even if it's already mid-countdown, silently
-              // extending the real wait past what was configured. Guard
-              // against that: only (re)start it if it isn't already running.
+              // once (within the staleness window above), the socket's
+              // reconnect-resync reports THIS challenge as still "running"
+              // and already past its deadline, and with no memory of having
+              // handled it before (autoUnlockedRef is in-memory, wiped by the
+              // refresh), this would fire again. Blindly re-emitting
+              // admin:startTimer would RESTART its timer from scratch even if
+              // it's already mid-countdown, silently extending the real wait
+              // past what was configured — guard against that: only
+              // (re)start it if it isn't already running.
               const nextTimer = timersRef.current[data.nextChallengeId];
               const nextAlreadyRunning = !!nextTimer && nextTimer.isRunning && !nextTimer.isPaused;
               if (!nextAlreadyRunning) {
@@ -416,8 +416,23 @@ export function AdminPanel({ locks, onToggleLock, challenges = [], onLocksChange
           .catch(() => {});
       };
       const fireInMs = timer.startTime + timer.duration + bufferMs - Date.now();
+      // A timer's isRunning never clears itself at expiry (see above), and
+      // the server resyncs every isRunning timer to any admin tab that
+      // connects — including ones from a completely different, long-since-
+      // abandoned session (e.g. an earlier test run with auto-advance left
+      // on). Without a cutoff, a brand-new admin tab loading minutes or
+      // hours later would see that ancient deadline as "already passed" and
+      // fire the chain instantly, silently re-unlocking (or restarting the
+      // timer on) something the admin may have deliberately re-locked since.
+      // A short grace window still covers the real case this is for — this
+      // tab briefly reconnecting mid-wait — without resurrecting stale state.
+      const STALE_FIRE_THRESHOLD_MS = 60_000;
       if (fireInMs <= 0) {
-        fire();
+        if (fireInMs > -STALE_FIRE_THRESHOLD_MS) {
+          fire();
+        } else {
+          autoUnlockedRef.current.add(key);
+        }
       } else {
         scheduled.push(setTimeout(fire, fireInMs));
       }
@@ -1366,6 +1381,7 @@ export default function CodeReviewChallenge() {
     setSelectedChallenge(challenge)
     setSelectedLines([])
     setSubmitted(false)
+    setSubmitToast(null)
     setShowResults(false)
     setShowHints(false)
     setFlagInput("");
