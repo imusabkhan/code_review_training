@@ -18,8 +18,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Not signed in' }, { status: 401 });
     }
 
-    // Find the challenge
-    const challenge = await prisma.challenge.findUnique({ where: { id: challengeId } });
+    // Challenge, lock, timer-expiry, and already-solved are independent reads —
+    // fetch them together instead of sequentially (same pattern as
+    // submit-challenge). This route is on the hot path (every flag submit),
+    // and each extra round trip to the DB is directly felt as UI lag.
+    const [challenge, lock, timerExpired, existing] = await Promise.all([
+      prisma.challenge.findUnique({ where: { id: challengeId } }),
+      prisma.challengeLock.findUnique({ where: { id: challengeId } }),
+      isChallengeTimerExpired(challengeId),
+      prisma.flagSubmission.findFirst({ where: { userName: name, challengeId, correct: true } }),
+    ]);
+
     if (!challenge) {
       return NextResponse.json({ success: false, error: 'Challenge not found' }, { status: 404 });
     }
@@ -41,22 +50,16 @@ export async function POST(req: NextRequest) {
       }, { status: 500 });
     }
 
-    // Check if challenge is locked
-    const lock = await prisma.challengeLock.findUnique({ where: { id: challengeId } });
     if (lock && lock.locked) {
       return NextResponse.json({ success: false, error: 'Challenge is locked' }, { status: 423 });
     }
     // Enforced server-side, not just a disabled button — the leaderboard is shared,
     // so a submission after time's up would be an unfair advantage over everyone
     // who worked within the window.
-    if (await isChallengeTimerExpired(challengeId)) {
+    if (timerExpired) {
       return NextResponse.json({ success: false, error: "Time's up for this challenge — submissions are closed." }, { status: 423 });
     }
 
-    // Check if user already solved this flag
-    const existing = await prisma.flagSubmission.findFirst({
-      where: { userName: name, challengeId, correct: true },
-    });
     if (existing) {
       // Already solved
       const user = await prisma.leaderboardUser.findUnique({ where: { name } });
@@ -67,34 +70,24 @@ export async function POST(req: NextRequest) {
     const correct = flag.trim() === expectedFlag.trim();
     console.log('Flag check:', { submitted: flag.trim(), expected: expectedFlag.trim(), correct });
 
+    // Recording the submission and reading/updating the leaderboard touch
+    // different rows — run them together instead of one after the other.
     let score = 0;
     if (correct) {
-      // Award 5 points and mark as solved
-      await prisma.flagSubmission.create({
-        data: {
-          userName: name,
-          challengeId,
-          flag,
-          correct: true,
-        },
-      });
-      const user = await prisma.leaderboardUser.upsert({
-        where: { name },
-        update: { score: { increment: 5 } },
-        create: { name, score: 5, avatar: "" },
-      });
+      const [, user] = await Promise.all([
+        prisma.flagSubmission.create({ data: { userName: name, challengeId, flag, correct: true } }),
+        prisma.leaderboardUser.upsert({
+          where: { name },
+          update: { score: { increment: 5 } },
+          create: { name, score: 5, avatar: "" },
+        }),
+      ]);
       score = user.score;
     } else {
-      // Incorrect flag, record attempt
-      await prisma.flagSubmission.create({
-        data: {
-          userName: name,
-          challengeId,
-          flag,
-          correct: false,
-        },
-      });
-      const user = await prisma.leaderboardUser.findUnique({ where: { name } });
+      const [, user] = await Promise.all([
+        prisma.flagSubmission.create({ data: { userName: name, challengeId, flag, correct: false } }),
+        prisma.leaderboardUser.findUnique({ where: { name } }),
+      ]);
       score = user?.score ?? 0;
     }
 
